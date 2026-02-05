@@ -10,7 +10,7 @@ class TorchModel(BaseModel):
     Wrapper genérico para cualquier red neuronal definida por el usuario.
     """
 
-    def __init__(self, name, nn_model: nn.Module, device="cpu", lr=1e-3, epochs=10, batch_size=32):
+    def __init__(self, name, nn_model: nn.Module, device="cpu", lr=1e-3, epochs=10, batch_size=32, criterion=None):
         super().__init__(name=name)
         self.model = nn_model.to(device)
         self.device = device
@@ -19,7 +19,7 @@ class TorchModel(BaseModel):
         self.batch_size = batch_size
         self.is_trained = False
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        self.criterion = nn.CrossEntropyLoss()  # clasificación
+        self.criterion = criterion or nn.CrossEntropyLoss()
         self.classes_ = None
 
     def fit(self, X, y):
@@ -52,6 +52,8 @@ class TorchModel(BaseModel):
         return preds
 
     def predict_proba(self, X):
+        if not self.is_trained:
+            raise RuntimeError("El modelo no ha sido entrenado")
         self.model.eval()
         X_tensor = torch.tensor(X, dtype=torch.float32, device=self.device)
         with torch.no_grad():
@@ -71,3 +73,12 @@ class TorchModel(BaseModel):
             "parameters": sum(p.numel() for p in self.model.parameters())
         })
         return meta
+
+    def capabilities(self):
+        return {
+            "predict_proba": True,
+            "confidence": True,
+            "shap": True,     # con wrapper adecuado
+            "lime": True,
+            "counterfactual": True
+        }

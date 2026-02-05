@@ -33,32 +33,30 @@ class LimeExplainer(BaseExplainer):
 
     def explain(self, model, X, instance_id=0, num_features=None, **kwargs) -> dict:
         """
-        Genera explicación LIME para una instancia concreta.
+        Genera explicación SHAP para una instancia concreta.
         """
+        if self._explainer is None:
+            self._build_explainer(model)
+
         X = np.asarray(X)
-        x_instance = X[instance_id]
+        x_instance = X[instance_id:instance_id + 1]
 
-        if num_features is None:
-            num_features = X.shape[1]
+        shap_values = self._explainer(x_instance)
 
-        exp = self._explainer.explain_instance(
-            x_instance,
-            model.predict_proba,
-            num_features=num_features
+        values = shap_values.values
+        if values.ndim == 3:  # multiclase
+            values = values[..., 1]
+
+        base = self._build_base_explanation(
+            model=model,
+            X=X,
+            instance_id=instance_id
         )
 
-        weights = dict(exp.as_list())
-
-        explanation = {
-            "explainer": self.name,
-            "scope": self.scope,
-            "instance_id": instance_id,
-            "prediction": int(model.predict([x_instance])[0]),
-            "confidence": float(model.get_confidence([x_instance])[0]),
-            "details": {
-                "type": "linear_approximation",
-                "feature_weights": weights
-            }
+        base["details"] = {
+            "type": "feature_importance",
+            "feature_names": self.feature_names,
+            "values": values.flatten().tolist()
         }
 
-        return explanation
+        return base

@@ -49,17 +49,16 @@ class ShapExplainer(BaseExplainer):
         if values.ndim == 3:  # multiclase
             values = values[..., 1]
 
-        explanation = {
-            "explainer": self.name,
-            "scope": self.scope,
-            "instance_id": instance_id,
-            "prediction": int(model.predict(x_instance)[0]),
-            "confidence": float(model.get_confidence(x_instance)[0]),
-            "details": {
-                "type": "feature_importance",
-                "feature_names": self.feature_names,
-                "values": values.flatten().tolist()
-            }
+        base = self._build_base_explanation(
+            model=model,
+            X=X,
+            instance_id=instance_id
+        )
+
+        base["details"] = {
+            "type": "feature_importance",
+            "feature_names": self.feature_names,
+            "values": values.flatten().tolist()
         }
 
-        return explanation
+        return base

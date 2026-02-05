@@ -56,20 +56,24 @@ class BaseExplainer(ABC):
             "scope": self.scope,
             "class": self.__class__.__name__
         }
+    
+    def _build_base_explanation(
+        self,
+        model,
+        X,
+        instance_id=None
+    ) -> dict:
+        x = X if instance_id is None else X[instance_id:instance_id + 1]
 
-    # ==================== Utilidades ====================
-
-    def _base_output(self, model, instance_id=None):
-        """
-        Estructura base común a todas las explicaciones.
-        """
-        prediction = model.predict(model._last_X) if hasattr(model, "_last_X") else None
-        confidence = model.get_confidence(model._last_X) if hasattr(model, "_last_X") else None
+        prediction = model.predict(x)
+        confidence = model.get_confidence(x)
 
         return {
             "explainer": self.name,
             "scope": self.scope,
             "instance_id": instance_id,
-            "prediction": prediction,
-            "confidence": confidence
+            "prediction": prediction.tolist() if prediction is not None else None,
+            "confidence": confidence.tolist() if confidence is not None else None,
+            "model": model.name
         }
+

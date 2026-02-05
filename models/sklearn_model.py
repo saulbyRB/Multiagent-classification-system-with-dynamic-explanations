@@ -32,6 +32,9 @@ class SklearnModel(BaseModel):
         """
         self.model.fit(X, y)
         self.is_trained = True
+        self.state["trained"] = True
+        self.state["n_fit"] += 1
+
         return self
 
     # ==================== Predicción ====================
@@ -97,3 +100,13 @@ class SklearnModel(BaseModel):
         })
 
         return base_meta
+    
+    def capabilities(self):
+        return {
+            "predict_proba": hasattr(self.model, "predict_proba"),
+            "confidence": True,
+            "shap": True,
+            "lime": True,
+            "counterfactual": True
+        }
+

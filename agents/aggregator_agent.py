@@ -1,98 +1,102 @@
-# agents/aggregator_agent.py
+# agents/classifier_agent.py
 
 import json
-import asyncio
-from collections import defaultdict
 from spade.agent import Agent
-from spade.behaviour import OneShotBehaviour
+from spade.behaviour import CyclicBehaviour, OneShotBehaviour
 from spade.message import Message
+from sklearn.model_selection import train_test_split
 
-
-class AggregatorAgent(Agent):
+class ClassifierAgent(Agent):
     """
-    Agente agregador que combina decisiones de múltiples agentes clasificadores.
+    Agente clasificador que alberga un modelo de ML y un explainer.
+    Se entrena automáticamente con un dataset de DatasetRegistry antes de atender mensajes.
     """
 
-    def __init__(self, jid, password, classifier_agents, strategy="weighted_voting", **kwargs):
+    def __init__(self, jid, password, model, explainer, dataset_id=None, registry=None, test_size=0.2, **kwargs):
         super().__init__(jid, password, **kwargs)
-        self.classifier_agents = classifier_agents
-        self.strategy = strategy
+        self.model = model
+        self.explainer = explainer
+        self.dataset_id = dataset_id
+        self.registry = registry
+        self.test_size = test_size
+
+        self.X_test = None
+        self.y_test = None
 
     async def setup(self):
-        print(f"[{self.jid}] Agente agregador listo.")
+        # 1️⃣ Behaviour de entrenamiento
+        self.add_behaviour(self.TrainingBehaviour())
 
-    async def classify(self, X, instance_id=0, timeout=10):
-        """
-        Lanza una petición de clasificación a todos los agentes
-        y agrega las respuestas.
-        """
-        behaviour = self.AggregationBehaviour(X, instance_id, timeout)
-        self.add_behaviour(behaviour)
-        return await behaviour.result()
+        # 2️⃣ Behaviour cíclico de clasificación
+        self.add_behaviour(self.ClassificationBehaviour())
+        print(f"[{self.jid}] Agente clasificador listo.")
 
-    class AggregationBehaviour(OneShotBehaviour):
-        def __init__(self, X, instance_id, timeout):
-            super().__init__()
-            self.X = X
-            self.instance_id = instance_id
-            self.timeout = timeout
-            self._result = None
-
+    # ==================== Training Behaviour ====================
+    class TrainingBehaviour(OneShotBehaviour):
         async def run(self):
-            # 1️⃣ Enviar peticiones
-            for agent_jid in self.agent.classifier_agents:
-                msg = Message(to=agent_jid)
-                msg.set_metadata("performative", "request")
-                msg.body = json.dumps({
-                    "action": "classify",
-                    "data": self.X,
-                    "instance_id": self.instance_id
-                })
-                await self.send(msg)
+            if self.agent.dataset_id and self.agent.registry:
+                X, y, meta = self.agent.registry.load(self.agent.dataset_id)
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=self.agent.test_size)
 
-            # 2️⃣ Recibir respuestas
-            responses = []
-            for _ in range(len(self.agent.classifier_agents)):
-                reply = await self.receive(timeout=self.timeout)
-                if reply is not None:
-                    responses.append(json.loads(reply.body))
+                # Entrenar el modelo
+                self.agent.model.fit(X_train, y_train)
 
-            # 3️⃣ Agregación
-            final_prediction, confidence = self.aggregate(responses)
+                # Guardar test para explicar después
+                self.agent.X_test = X_test
+                self.agent.y_test = y_test
 
-            # 4️⃣ Meta-explicación
-            meta_explanation = {
-                "strategy": self.agent.strategy,
-                "individual_decisions": responses
-            }
+                print(f"[{self.agent.jid}] Modelo entrenado automáticamente con dataset '{self.agent.dataset_id}'")
 
-            self._result = {
-                "final_prediction": final_prediction,
-                "confidence": confidence,
-                "strategy": self.agent.strategy,
-                "agents_used": [r["agent"] for r in responses],
-                "meta_explanation": meta_explanation
-            }
+    # ==================== Classification Behaviour ====================
+    class ClassificationBehaviour(CyclicBehaviour):
+        async def run(self):
+            msg = await self.receive(timeout=10)
+            if msg is None:
+                return
 
-        def aggregate(self, responses):
-            """
-            Estrategias de agregación.
-            """
-            votes = defaultdict(float)
+            # Ignorar si el modelo aún no está entrenado
+            if not getattr(self.agent.model, "is_trained", True):
+                print(f"[{self.agent.jid}] Modelo aún no entrenado. Ignorando mensaje.")
+                return
 
-            for r in responses:
-                pred = r["prediction"]
-                conf = r.get("confidence", 1.0)
-                weight = conf if self.agent.strategy == "weighted_voting" else 1.0
-                votes[pred] += weight
+            try:
+                content = json.loads(msg.body)
+                action = content.get("action")
 
-            final_pred = max(votes, key=votes.get)
-            total_weight = sum(votes.values())
-            confidence = votes[final_pred] / total_weight if total_weight > 0 else None
+                if action != "classify":
+                    return
 
-            return final_pred, confidence
+                # Usar datos del mensaje o fallback al test interno
+                X = content.get("data", self.agent.X_test)
+                instance_id = content.get("instance_id", 0)
 
-        async def result(self):
-            while self._result is None:
-                await asyncio.sleep(0.1)
-            return self._result
+                # 1️⃣ Predicción
+                y_pred = int(self.agent.model.predict(X)[instance_id])
+                confidence = self.agent.model.get_confidence(X)
+                confidence = float(confidence[instance_id]) if confidence is not None else None
+
+                # 2️⃣ Explicación dinámica
+                explanation = self.agent.explainer.explain(
+                    model=self.agent.model,
+                    X=X,
+                    instance_id=instance_id
+                )
+
+                # 3️⃣ Respuesta
+                response = {
+                    "agent": str(self.agent.jid),
+                    "prediction": y_pred,
+                    "confidence": confidence,
+                    "explanation": explanation
+                }
+
+                reply = Message(to=str(msg.sender))
+                reply.set_metadata("performative", "inform")
+                reply.body = json.dumps(response)
+                await self.send(reply)
+
+            except Exception as e:
+                error_msg = Message(to=str(msg.sender))
+                error_msg.set_metadata("performative", "failure")
+                error_msg.body = json.dumps({"error": str(e)})
+                await self.send(error_msg)
