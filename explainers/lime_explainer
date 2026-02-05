@@ -1,0 +1,64 @@
+# explainers/lime_explainer.py
+
+import numpy as np
+import pandas as pd
+from lime.lime_tabular import LimeTabularExplainer
+from explainers.base_explainer import BaseExplainer
+
+
+class LimeExplainer(BaseExplainer):
+    """
+    Explainer LIME para clasificación tabular.
+    """
+
+    def __init__(
+        self,
+        training_data,
+        feature_names,
+        class_names,
+        discretize_continuous=True
+    ):
+        super().__init__(name="lime", scope="local")
+
+        self.feature_names = feature_names
+        self.class_names = class_names
+
+        self._explainer = LimeTabularExplainer(
+            training_data=np.asarray(training_data),
+            feature_names=feature_names,
+            class_names=class_names,
+            discretize_continuous=discretize_continuous,
+            mode="classification"
+        )
+
+    def explain(self, model, X, instance_id=0, num_features=None, **kwargs) -> dict:
+        """
+        Genera explicación LIME para una instancia concreta.
+        """
+        X = np.asarray(X)
+        x_instance = X[instance_id]
+
+        if num_features is None:
+            num_features = X.shape[1]
+
+        exp = self._explainer.explain_instance(
+            x_instance,
+            model.predict_proba,
+            num_features=num_features
+        )
+
+        weights = dict(exp.as_list())
+
+        explanation = {
+            "explainer": self.name,
+            "scope": self.scope,
+            "instance_id": instance_id,
+            "prediction": int(model.predict([x_instance])[0]),
+            "confidence": float(model.get_confidence([x_instance])[0]),
+            "details": {
+                "type": "linear_approximation",
+                "feature_weights": weights
+            }
+        }
+
+        return explanation
