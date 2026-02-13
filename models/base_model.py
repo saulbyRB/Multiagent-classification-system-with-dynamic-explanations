@@ -5,8 +5,7 @@ import numpy as np
 
 class BaseModel(ABC):
 
-    def __init__(self, name: str):
-        self.name = name
+    def __init__(self):
         self.is_trained = False
         self.state = {
             "trained": False,
@@ -47,7 +46,6 @@ class BaseModel(ABC):
 
     def get_metadata(self) -> dict:
         return {
-            "name": self.name,
             "class": self.__class__.__name__,
             "trained": self.is_trained,
             "capabilities": self.capabilities()

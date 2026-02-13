@@ -1,0 +1,13 @@
+version: "3"
+
+services:
+  xmpp:
+    image: prosody/prosody:latest
+    container_name: prosody_server
+    ports:
+      - "5222:5222"   # XMPP client port
+      - "5280:5280"   # HTTP admin (opcional)
+    environment:
+      - XMPP_DOMAIN=localhost
+      - XMPP_USERS=clf1:password;clf2:password;clf3:password;aggregator:password
+    restart: unless-stopped

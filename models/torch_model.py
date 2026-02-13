@@ -10,8 +10,8 @@ class TorchModel(BaseModel):
     Wrapper genérico para cualquier red neuronal definida por el usuario.
     """
 
-    def __init__(self, name, nn_model: nn.Module, device="cpu", lr=1e-3, epochs=10, batch_size=32, criterion=None):
-        super().__init__(name=name)
+    def __init__(self, nn_model: nn.Module, device="cpu", lr=1e-3, epochs=10, batch_size=32, criterion=None):
+        super().__init__()
         self.model = nn_model.to(device)
         self.device = device
         self.lr = lr

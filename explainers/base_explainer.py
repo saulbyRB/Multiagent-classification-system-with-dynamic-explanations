@@ -74,6 +74,5 @@ class BaseExplainer(ABC):
             "instance_id": instance_id,
             "prediction": prediction.tolist() if prediction is not None else None,
             "confidence": confidence.tolist() if confidence is not None else None,
-            "model": model.name
         }
 

@@ -13,9 +13,8 @@ class SklearnModel(BaseModel):
     multiagente mediante una interfaz común.
     """
 
-    def __init__(self, name: str, model: BaseEstimator):
-        super().__init__(name=name)
-
+    def __init__(self, model: BaseEstimator):
+        super().__init__()
         if not isinstance(model, BaseEstimator):
             raise TypeError(
                 "El modelo debe ser una instancia de sklearn.base.BaseEstimator"

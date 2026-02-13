@@ -8,7 +8,7 @@ from visualization.base_visualizer import BaseVisualizer
 class ShapVisualizer(BaseVisualizer):
 
     def can_visualize(self, explanation: dict) -> bool:
-        return (
+        return ( 
             explanation["explainer"] == "shap"
             and explanation["scope"] == "local"
             and explanation["details"]["type"] == "feature_importance"
