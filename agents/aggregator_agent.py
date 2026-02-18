@@ -2,9 +2,9 @@
 import asyncio
 from collections import defaultdict
 from agents.message import Message
-from evaluation.hybrid_evaluator import HybridEvaluator
-from evaluation.conflict_resolver import ConflictResolver
-from evaluation.feedback_builder import FeedbackBuilder
+from agents.evaluation.hybrid_evaluator import HybridEvaluator
+from agents.evaluation.conflict_resolver import ConflictResolver
+from agents.evaluation.feedback_builder import FeedbackBuilder
 
 
 class AggregatorAgent:
