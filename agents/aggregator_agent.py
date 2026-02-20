@@ -5,7 +5,7 @@ from agents.message import Message
 from agents.evaluation.hybrid_evaluator import HybridEvaluator
 from agents.evaluation.conflict_resolver import ConflictResolver
 from agents.evaluation.feedback_builder import FeedbackBuilder
-
+from visualization.logs import log
 
 class AggregatorAgent:
 
@@ -51,6 +51,7 @@ class AggregatorAgent:
                 (await self.inbox.get()).body
                 for _ in self.classifier_ids
             ]
+            log(f"Recibidas {len(responses)} respuestas", "AGGREGATOR")
 
             self.buffer[self.current_iteration] = responses
             self.global_history.append(responses)
@@ -65,7 +66,13 @@ class AggregatorAgent:
             print(f"[Aggregator] Scores = {evaluation['scores']}")
             print(f"[Aggregator] Decisions = {decisions}")
 
-            # -------- Feedback RL --------
+            # -------- Criterio de consenso --------
+            if all(d in {"keep", "soft_adjust"} for d in decisions):
+                print("[Aggregator] Consenso alcanzado → terminación anticipada")
+                break
+
+            # -------- Feedback --------
+            log("Calculando feedback global", "AGGREGATOR")
             for idx, (cid, decision) in enumerate(zip(self.classifier_ids, decisions)):
                 feedback = self.feedback_builder.build(
                     agent_id=cid,
@@ -75,10 +82,20 @@ class AggregatorAgent:
                     idx=idx
                 )
 
+                feedback["action"] = "feedback"
+                feedback["iteration"] = self.current_iteration
+
                 await queues[cid].put(
                     Message(sender="aggregator", body=feedback)
                 )
 
+            log(f"Iteración {self.current_iteration} completada", "AGGREGATOR")
             self.current_iteration += 1
 
-        print("\n[Aggregator] Finalizado")
+        # -------- Shutdown --------
+        print("\n[Aggregator] Finalizado → enviando shutdown")
+
+        for cid in self.classifier_ids:
+            await queues[cid].put(
+                Message(sender="aggregator", body={"action": "shutdown"})
+            )

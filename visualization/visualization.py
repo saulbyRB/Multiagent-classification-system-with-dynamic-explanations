@@ -92,6 +92,17 @@ def plot_explanation_similarity(agent):
     plt.show()
 
 def plot_explanation_divergence(agents):
+    agents = {
+        k: a for k, a in agents.items()
+        if hasattr(a, "explanation_history") and len(a.explanation_history) > 0
+    }
+
+    if len(agents) < 2:
+        print("[Viz] No hay suficientes agentes con histórico de explicaciones")
+        return
+
+    min_len = min(len(a.explanation_history) for a in agents.values())
+    
     min_len = min(len(a.explanation_history) for a in agents.values())
     sims_over_time = []
     for i in range(min_len):
