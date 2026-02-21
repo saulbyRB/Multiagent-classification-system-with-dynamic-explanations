@@ -36,38 +36,45 @@ class ConflictResolver:
         low  = np.quantile(scores, self.low_q)
         high = np.quantile(scores, self.high_q)
 
-        resolutions = []
+        decisions = []
 
         for s, c, e, stab, fid in zip(scores, conf, exp, stability, fidelity):
 
-            # 🟥 Caso peligroso
+            # 🔴 Caso peligroso
             if c > 0.7 and (e < self.min_exp_quality or fid < self.min_fidelity):
-                resolutions.append("force_adjust")
+                decisions.append("force_adjust")
                 continue
 
-            # 🟥 Inestabilidad explicativa
+            # 🔴 Inestabilidad explicativa
             if stab < self.min_stability:
-                resolutions.append("adjust")
+                decisions.append("adjust")
                 continue
 
-            # 🟡 Baja fidelidad pero buen score
+            # 🟡 Baja fidelidad
             if fid < self.min_fidelity:
-                resolutions.append("soft_adjust")
+                decisions.append("soft_adjust")
                 continue
 
-            # Score-based (fallback)
+            # ⚪ Fallback por score
             if s >= high:
-                resolutions.append("keep")
+                decisions.append("keep")
             elif s <= low:
-                resolutions.append("adjust")
+                decisions.append("adjust")
             else:
-                resolutions.append("soft_adjust")
+                decisions.append("soft_adjust")
 
-        # 🔚 Criterio de parada temprana
         stop = (
-            np.mean(consensus) > self.consensus_stop
-            and np.mean(stability) > self.min_stability
-            and all(r in {"keep", "soft_adjust"} for r in resolutions)
+            np.mean(consensus) >= self.consensus_stop
+            and np.mean(stability) >= self.min_stability
+            and all(d in {"keep", "soft_adjust"} for d in decisions)
         )
 
-        return resolutions, stop
+        return {
+            "decisions": decisions,
+            "stop": bool(stop),
+            "diagnostics": {
+                "mean_consensus": float(np.mean(consensus)),
+                "mean_stability": float(np.mean(stability)),
+                "mean_fidelity": float(np.mean(fidelity))
+            }
+        }

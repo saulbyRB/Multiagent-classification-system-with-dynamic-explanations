@@ -15,7 +15,7 @@ class AggregatorAgent:
         self.classifier_ids = classifier_ids
         self.max_iterations = max_iterations
 
-        self.evaluator = HybridEvaluator(alpha, beta, gamma)
+        self.evaluator = HybridEvaluator()
         self.resolver = ConflictResolver()
         self.feedback_builder = FeedbackBuilder()
 
@@ -23,7 +23,6 @@ class AggregatorAgent:
         self.current_iteration = 0
 
         self.instance = None
-        self.buffer = defaultdict(list)
         self.global_history = []
 
     async def run(self, queues, instance):
@@ -53,22 +52,32 @@ class AggregatorAgent:
             ]
             log(f"Recibidas {len(responses)} respuestas", "AGGREGATOR")
 
-            self.buffer[self.current_iteration] = responses
-            self.global_history.append(responses)
-
             # -------- Evaluación --------
             evaluation = self.evaluator.evaluate(responses)
 
             # -------- Resolución de conflictos --------
-            decisions = self.resolver.resolve(evaluation)
+            resolution = self.resolver.resolve(evaluation)
+
+            decisions = resolution["decisions"]
+            stop = resolution["stop"]
 
             print(f"[Aggregator] Majority = {evaluation['majority_prediction']}")
             print(f"[Aggregator] Scores = {evaluation['scores']}")
             print(f"[Aggregator] Decisions = {decisions}")
+            print(f"[Aggregator] Stop = {stop}")
 
-            # -------- Criterio de consenso --------
-            if all(d in {"keep", "soft_adjust"} for d in decisions):
-                print("[Aggregator] Consenso alcanzado → terminación anticipada")
+            # -------- Historial estructurado --------
+            self.global_history.append({
+                "iteration": self.current_iteration,
+                "responses": responses,
+                "evaluation": evaluation,
+                "decisions": decisions,
+                "stop": stop
+            })
+
+            # -------- Criterio de parada --------
+            if stop:
+                print("[Aggregator] Consenso estable alcanzado → terminación anticipada")
                 break
 
             # -------- Feedback --------

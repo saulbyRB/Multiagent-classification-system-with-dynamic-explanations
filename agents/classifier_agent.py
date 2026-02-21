@@ -33,7 +33,7 @@ class ClassifierAgent:
         self.inbox = asyncio.Queue()
         self.current_iteration = 0
         self.metrics_history = []
-        self.explanations_history = []
+        self.explanation_history = []
 
         self.X_train = None
         self.y_train = None
@@ -98,16 +98,17 @@ class ClassifierAgent:
     
         explanations = self._generate_explanations(instance)
 
+        if not hasattr(self, "explanation_history"):
+            self.explanation_history = []
+
         if explanations:
-            log("Calculando explicaciones", self.id)
-
-            # ⬇️ NUEVO: guardar vector explicativo
-            # asumimos una explicación principal (ej. SHAP)
-            main_exp = explanations[0]
-
-            if "details" in main_exp and "values" in main_exp["details"]:
-                values = np.array(main_exp["details"]["values"])
-                self.explanation_history.append(values)
+            vectors = [
+                np.array(e["details"]["values"])
+                for e in explanations
+                if "details" in e and "values" in e["details"]
+            ]
+            if vectors:
+                self.explanation_history.append(np.mean(vectors, axis=0))
 
         response = {
             "agent_id": self.id,
@@ -115,7 +116,8 @@ class ClassifierAgent:
             "prediction": y_pred,
             "confidence": confidence,
             "metrics": self.metrics_history[-1],
-            "explanations": explanations
+            "explanations": explanations,
+            "exp_history" : getattr(self, "explanation_history", [])
         }
         
         log("Clasificación completada", self.id)
