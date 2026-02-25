@@ -3,7 +3,15 @@ import numpy as np
 
 class ConflictResolver:
     """
-    Resolución de conflictos multi-criterio y explicación-aware.
+    Resolución de conflictos multi-criterio y explanation-aware.
+
+    Usa:
+    - score global
+    - confianza del modelo
+    - calidad explicativa
+    - consenso inter-agente
+    - estabilidad temporal
+    - fidelidad modelo-explicación
     """
 
     def __init__(
@@ -23,39 +31,45 @@ class ConflictResolver:
         self.consensus_stop = consensus_stop
 
     def resolve(self, evaluation):
-        scores = np.array(evaluation["scores"])
-        conf   = np.array(evaluation["components"]["conf"])
-        exp    = np.array(evaluation["components"]["exp"])
+        scores = np.asarray(evaluation["scores"], dtype=float)
+        conf   = np.asarray(evaluation["components"]["conf"], dtype=float)
+        exp_q  = np.asarray(evaluation["components"]["exp"], dtype=float)
 
         exp_d = evaluation["components"].get("exp_detail", {})
 
-        consensus = np.array(exp_d.get("consensus", exp))
-        stability = np.array(exp_d.get("stability", np.ones_like(exp)))
-        fidelity  = np.array(exp_d.get("fidelity", np.ones_like(exp)))
+        consensus = np.asarray(
+            exp_d.get("consensus", exp_q), dtype=float
+        )
+        stability = np.asarray(
+            exp_d.get("stability", np.full_like(exp_q, 0.5)), dtype=float
+        )
+        fidelity = np.asarray(
+            exp_d.get("fidelity", np.full_like(exp_q, 0.5)), dtype=float
+        )
 
         low  = np.quantile(scores, self.low_q)
         high = np.quantile(scores, self.high_q)
 
         decisions = []
 
-        for s, c, e, stab, fid in zip(scores, conf, exp, stability, fidelity):
+        for s, c, e, stab, fid in zip(scores, conf, exp_q, stability, fidelity):
 
-            # 🔴 Caso peligroso
+            # 🔴 Riesgo crítico: modelo confiado pero explica mal
             if c > 0.7 and (e < self.min_exp_quality or fid < self.min_fidelity):
                 decisions.append("force_adjust")
                 continue
 
-            # 🔴 Inestabilidad explicativa
+            # 🔴 Explicaciones inestables
             if stab < self.min_stability:
                 decisions.append("adjust")
                 continue
 
-            # 🟡 Baja fidelidad
+            # 🟡 Baja fidelidad explicativa
             if fid < self.min_fidelity:
                 decisions.append("soft_adjust")
                 continue
 
-            # ⚪ Fallback por score
+            # ⚪ Decisión basada en score global
             if s >= high:
                 decisions.append("keep")
             elif s <= low:
@@ -63,10 +77,11 @@ class ConflictResolver:
             else:
                 decisions.append("soft_adjust")
 
+        # 🔚 Criterio de parada por consenso explicativo estable
         stop = (
-            np.mean(consensus) >= self.consensus_stop
-            and np.mean(stability) >= self.min_stability
-            and all(d in {"keep", "soft_adjust"} for d in decisions)
+            np.mean(consensus) >= self.consensus_stop and
+            np.mean(stability) >= self.min_stability and
+            all(d in {"keep", "soft_adjust"} for d in decisions)
         )
 
         return {

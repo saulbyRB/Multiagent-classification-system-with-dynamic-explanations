@@ -10,7 +10,7 @@ from sklearn.metrics import (
 )
 from agents.message import Message
 from visualization.logs import log
-
+from models.torch_model import TorchModel
 
 class ClassifierAgent:
 
@@ -129,39 +129,42 @@ class ClassifierAgent:
     # ---------- feedback ----------
 
     def adjust_from_feedback(self, feedback):
-        """
-        feedback contiene:
-        - iteration
-        - strategy
-        """
         self.current_iteration = feedback["iteration"]
         strategy = feedback.get("strategy")
+        evaluation = feedback.get("evaluation", {})
 
-        log(
-            f"Ajustando modelo | iter={self.current_iteration} | strategy={strategy}",
-            self.id
-        )
+        log(f"Ajustando modelo | iter={self.current_iteration} | strategy={strategy}", self.id)
 
-        if strategy in {"adjust", "soft_adjust", "force_adjust"}:
-            self.model.fit(self.X_train, self.y_train)
+        if hasattr(self.model, "adjust_from_feedback"):
+            # Modelos adaptativos: RF, TorchModel, GB, kNN, SVM, LogReg
+            signals = {
+                "strategy": strategy,
+                "reward": evaluation.get("reward", 0.5)
+            }
+            if isinstance(self.model, TorchModel):  # TorchModel no necesita X_test
+                self.model.adjust_from_feedback(signals, self.X_train, self.y_train)
+            else:
+                self.model.adjust_from_feedback(signals, self.X_train, self.y_train,
+                                                self.X_test, self.y_test)
+        elif strategy in {"adjust", "force_adjust"}:
+            # Fallback para modelos sin lógica adaptativa
+            idx = np.random.permutation(len(self.X_train))
+            self.model.fit(self.X_train[idx], self.y_train[idx])
+        # soft_adjust y keep: no re-entrenar
 
         self._fit_and_evaluate(initial=False)
-
-        print(
-            f"[{self.id}] Iter {self.current_iteration} | "
-            f"Estrategia={strategy} | "
-            f"F1={self.metrics_history[-1]['f1']:.3f}"
-        )
 
     # ---------- helpers ----------
 
     def _fit_and_evaluate(self, initial=False):
         # Entrenar si es inicial o si el modelo aún no está entrenado
         if initial or not self.model.is_trained:
+            log(f"Entrenando modelo (iter={self.current_iteration})", self.id)
             self.model.fit(self.X_train, self.y_train)
-
-        log(f"Entrenando modelo (iter={self.current_iteration}, initial={initial})", self.id)
-
+            for exp in self.explainers:
+                if hasattr(exp, '_explainer'):
+                    exp._explainer = None 
+        # Evaluar siempre
         y_pred = self.model.predict(self.X_test)
 
         metrics = {

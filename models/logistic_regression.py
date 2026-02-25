@@ -5,7 +5,7 @@ from sklearn.metrics import accuracy_score, f1_score
 from models.sklearn_model import SklearnModel
 
 
-class LogisticRegression(SklearnModel):
+class Logisticregression(SklearnModel):
     """
     Logistic Regression con ajuste adaptativo de regularización.
     Modelo estabilizador y altamente explicable.
