@@ -169,7 +169,5 @@ class HybridEvaluator:
         return ((v - v.min()) / (v.max() - v.min() + eps)).tolist()
 
     def _cosine(self, a, b, eps=1e-8):
-        return float(
-            np.dot(a, b) /
-            (np.linalg.norm(a) * np.linalg.norm(b) + eps)
-        )
+        raw = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + eps))
+        return max(0.0, raw)

@@ -95,8 +95,6 @@ class ClassifierAgent:
         confidence = self._estimate_confidence(instance)
 
         explanations = self._generate_explanations(instance)
-    
-        explanations = self._generate_explanations(instance)
 
         if not hasattr(self, "explanation_history"):
             self.explanation_history = []
@@ -136,21 +134,26 @@ class ClassifierAgent:
         log(f"Ajustando modelo | iter={self.current_iteration} | strategy={strategy}", self.id)
 
         if hasattr(self.model, "adjust_from_feedback"):
-            # Modelos adaptativos: RF, TorchModel, GB, kNN, SVM, LogReg
             signals = {
                 "strategy": strategy,
                 "reward": evaluation.get("reward", 0.5)
             }
-            if isinstance(self.model, TorchModel):  # TorchModel no necesita X_test
+            if isinstance(self.model, TorchModel):
                 self.model.adjust_from_feedback(signals, self.X_train, self.y_train)
             else:
                 self.model.adjust_from_feedback(signals, self.X_train, self.y_train,
                                                 self.X_test, self.y_test)
         elif strategy in {"adjust", "force_adjust"}:
-            # Fallback para modelos sin lógica adaptativa
             idx = np.random.permutation(len(self.X_train))
             self.model.fit(self.X_train[idx], self.y_train[idx])
-        # soft_adjust y keep: no re-entrenar
+
+        # Invalidar explainers siempre que haya habido re-entrenamiento
+        if strategy in {"adjust", "force_adjust", "soft_adjust"}:
+            for exp in self.explainers:
+                if hasattr(exp, "invalidate"):
+                    exp.invalidate()
+                elif hasattr(exp, "_explainer"):
+                    exp._explainer = None
 
         self._fit_and_evaluate(initial=False)
 
