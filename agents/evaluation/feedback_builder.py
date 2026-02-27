@@ -13,6 +13,6 @@ class FeedbackBuilder:
                 "exp_consensus": evaluation["components"]["exp_detail"]["consensus"][idx],
                 "exp_stability": evaluation["components"]["exp_detail"]["stability"][idx],
                 "num_explainers": len(explanations) if explanations else 0,
-                "global_score": evaluation["global_score"]
+                "global_score": evaluation["global_score"],
             }
         }

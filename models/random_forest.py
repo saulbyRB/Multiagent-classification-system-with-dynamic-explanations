@@ -74,7 +74,8 @@ class RandomForest(SklearnModel):
             # Reentrenamos modelo con nuevos hiperparámetros
             self.model.set_params(
                 n_estimators=self.hyperparams["n_estimators"],
-                max_depth=self.hyperparams["max_depth"]
+                max_depth=self.hyperparams["max_depth"],
+                random_state=np.random.randint(0, 1000)
             )
             self.model.fit(X_train, y_train)
 

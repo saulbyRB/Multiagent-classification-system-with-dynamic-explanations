@@ -96,9 +96,19 @@ class ClassifierAgent:
 
         explanations = self._generate_explanations(instance)
 
-        if not hasattr(self, "explanation_history"):
-            self.explanation_history = []
+        # Sustituir el bloque de explanation_history por esto:
+        if not hasattr(self, "explanation_history_by_type"):
+            self.explanation_history_by_type = {}
 
+        for e in explanations:
+            name = e.get("explainer", "unknown")
+            if "details" in e and "values" in e["details"]:
+                v = np.array(e["details"]["values"])
+                if name not in self.explanation_history_by_type:
+                    self.explanation_history_by_type[name] = []
+                self.explanation_history_by_type[name].append(v)
+
+        # Mantener el history global para compatibilidad con visualización
         if explanations:
             vectors = [
                 np.array(e["details"]["values"])
@@ -109,13 +119,16 @@ class ClassifierAgent:
                 self.explanation_history.append(np.mean(vectors, axis=0))
 
         response = {
-            "agent_id": self.id,
-            "iteration": iteration,
-            "prediction": y_pred,
-            "confidence": confidence,
-            "metrics": self.metrics_history[-1],
+            "agent_id":    self.id,
+            "iteration":   iteration,
+            "prediction":  y_pred,
+            "confidence":  confidence,
+            "metrics":     self.metrics_history[-1],
             "explanations": explanations,
-            "exp_history" : getattr(self, "explanation_history", [])
+            "exp_history": getattr(self, "explanation_history", []),
+            "exp_history_by_type": getattr(self, "explanation_history_by_type", {}),
+            "instance":    instance,     # ← añadir
+            "model_ref":   self.model    # ← añadir
         }
         
         log("Clasificación completada", self.id)

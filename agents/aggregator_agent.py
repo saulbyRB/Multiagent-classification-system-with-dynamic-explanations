@@ -9,7 +9,7 @@ from visualization.logs import log
 
 class AggregatorAgent:
 
-    def __init__(self, classifier_ids, max_iterations=3,
+    def __init__(self, classifier_ids, max_iterations=50,
                  alpha=0.5, beta=0.2, gamma=0.3):
 
         self.classifier_ids = classifier_ids

@@ -67,7 +67,7 @@ class GradientBoostingModel(SklearnModel):
             self.hyperparams["learning_rate"] / factor, 0.01
         )
 
-        self.model.set_params(**self.hyperparams)
+        self.model.set_params(**self.hyperparams,random_state=np.random.randint(0, 1000))
         self.model.fit(X_train, y_train)
 
         print(
