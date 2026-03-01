@@ -1,4 +1,4 @@
-# advanced_knn_model.py
+# knn.py
 import numpy as np
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
@@ -6,20 +6,11 @@ from models.sklearn_model import SklearnModel
 
 
 class KNN(SklearnModel):
-    """
-    k-NN adaptativo con ajuste del vecindario.
-    Explorador local de patrones.
-    """
 
     def __init__(self, n_neighbors=5, weights="distance", **kwargs):
         super().__init__(
-            KNeighborsClassifier(
-                n_neighbors=n_neighbors,
-                weights=weights,
-                **kwargs
-            )
+            KNeighborsClassifier(n_neighbors=n_neighbors, weights=weights, **kwargs)
         )
-
         self.hyperparams = {
             "n_neighbors": n_neighbors,
             "weights": weights
@@ -33,23 +24,31 @@ class KNN(SklearnModel):
         return 0.5 * acc + 0.5 * f1
 
     def adjust_from_feedback(self, signals, X_train, y_train, X_test, y_test):
-        reward = self.evaluate_performance(X_test, y_test)
+        reward   = self.evaluate_performance(X_test, y_test)
+        trend    = signals.get("trend", 0.0)
+        strategy = signals.get("strategy", "adjust")
+
         self.reward_history.append(reward)
 
-        strategy = signals.get("strategy", "adjust")
         if strategy == "keep":
             print("[kNN] keep → sin cambios")
             return
 
         if len(self.reward_history) >= 2:
             delta = self.reward_history[-1] - self.reward_history[-2]
-            # empeora → más vecinos (más suavidad)
             factor = 1.0 + np.tanh(-delta * 4)
         else:
             factor = 1.2
 
         if strategy == "soft_adjust":
             factor = 1 + (factor - 1) / 2
+
+        # Si el aggregator dice que empeoramos, reducimos k en lugar
+        # de aumentarlo — buscamos fronteras más locales
+        if trend < -0.05:
+            factor = 1 / factor  # invertir: menos vecinos
+            print(f"[kNN] Tendencia negativa ({trend:+.3f}) → "
+                  f"reduciendo k (más local)")
 
         new_k = int(self.hyperparams["n_neighbors"] * factor)
         self.hyperparams["n_neighbors"] = int(np.clip(new_k, 3, 30))

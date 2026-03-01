@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 import numpy as np
+import copy
 
 class BaseModel(ABC):
 
@@ -51,3 +52,8 @@ class BaseModel(ABC):
             "capabilities": self.capabilities()
         }
 
+    def get_state(self):
+        return copy.deepcopy(self.model)
+
+    def set_state(self, state):
+        self.model = copy.deepcopy(state)
