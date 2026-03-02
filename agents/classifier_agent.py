@@ -28,6 +28,7 @@ class ClassifierAgent:
         self.X_train = self.y_train = None
         self.X_test  = self.y_test  = None
         self.running = True
+        self._iters_since_adjust = 0
 
     async def setup(self):
         print(f"[{self.id}] Setup iniciado")
@@ -88,6 +89,9 @@ class ClassifierAgent:
             if vectors:
                 self.explanation_history.append(np.mean(vectors, axis=0))
 
+        response["iters_since_adjust"] = self._iters_since_adjust
+        self._iters_since_adjust += 1
+        
         response = {
             "agent_id":    self.id,
             "iteration":   iteration,
@@ -156,6 +160,7 @@ class ClassifierAgent:
                 elif hasattr(exp, "_explainer"):
                     exp._explainer = None
 
+        self._iters_since_adjust = 0
         self._fit_and_evaluate(initial=False)
 
     def _fit_and_evaluate(self, initial=False):

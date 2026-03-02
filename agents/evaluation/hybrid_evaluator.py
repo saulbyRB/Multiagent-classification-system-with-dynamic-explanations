@@ -57,7 +57,7 @@ class HybridEvaluator:
         S_perf = np.array(self._performance_scores(perfs))
 
         exp_result = self._explanation_quality_multi(
-            explanations_by_type, histories_by_type, instances, models, preds
+            explanations_by_type, histories_by_type, instances, models, preds, responses
         )
 
         S_exp = exp_result["quality"]
@@ -69,6 +69,10 @@ class HybridEvaluator:
             self.w_perf * S_perf
         )
 
+        # En evaluate(), después de calcular S_perf, añadir:
+        S_acc = np.array([m.get("accuracy", 0.0) for m in perfs])
+
+        # Y en el return, dentro de components:
         return {
             "global_score":        float(scores.mean()),
             "majority_prediction": majority,
@@ -78,6 +82,7 @@ class HybridEvaluator:
                 "conf": S_conf.tolist(),
                 "perf": S_perf.tolist(),
                 "exp":  S_exp.tolist(),
+                "acc":  S_acc.tolist(),    # ← añadir esto
                 "exp_detail": {
                     "consensus":     exp_result["consensus"],
                     "stability":     exp_result["stability"],
@@ -155,10 +160,14 @@ class HybridEvaluator:
     # ======================================================
 
     def _explanation_quality_multi(
-        self, explanations_by_type, histories_by_type, instances, models, preds
+        self, explanations_by_type, histories_by_type, instances, models, preds,
+        responses  # added to access iters_since_adjust per agent
     ):
         n = len(histories_by_type)
         explainer_names = list(explanations_by_type.keys())
+
+        # Extract iters_since_adjust once; default 99 = no recent adjustment
+        iters_since_adjust = [r.get("iters_since_adjust", 99) for r in responses]
 
         per_explainer = {}
         all_consensus = np.zeros(n)
@@ -185,13 +194,20 @@ class HybridEvaluator:
             ]
 
             stability = []
-            for v, hist_by_type in zip(vectors, histories_by_type):
+            for i, (v, hist_by_type) in enumerate(zip(vectors, histories_by_type)):
                 hist = hist_by_type.get(name, [])
                 if v is None or len(hist) == 0:
-                    stability.append(0.5)
+                    raw_stab = 0.5
                 else:
                     prev = np.mean(hist, axis=0)
-                    stability.append(self._cosine(v, prev))
+                    raw_stab = self._cosine(v, prev)
+
+                # Within 2 iters of an adjustment, instability is expected —
+                # floor at 0.75 instead of penalising it.
+                if iters_since_adjust[i] <= 2:
+                    stability.append(max(raw_stab, 0.75))
+                else:
+                    stability.append(raw_stab)
 
             fidelity = [
                 self._compute_fidelity(v, inst, model, pred)
