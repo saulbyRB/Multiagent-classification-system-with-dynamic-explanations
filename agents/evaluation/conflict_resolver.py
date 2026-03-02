@@ -105,11 +105,7 @@ class ConflictResolver:
             if s >= high:
                 decisions.append("keep")
             elif s <= low:
-                # Solo adjust si realmente tiene problemas individuales
-                if q >= self.min_exp_quality and stab >= self.min_stability and acc >= self.min_accuracy_stop:
-                    decisions.append("soft_adjust")  # bueno pero el peor → suave
-                else:
-                    decisions.append("adjust")       # malo → ajuste real
+                decisions.append("adjust")
             else:
                 decisions.append("soft_adjust")
 
