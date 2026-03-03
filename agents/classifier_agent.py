@@ -28,7 +28,8 @@ class ClassifierAgent:
         self.X_train = self.y_train = None
         self.X_test  = self.y_test  = None
         self.running = True
-        self._iters_since_adjust = 0
+        self._iters_since_adjust  = 0
+        self._consecutive_adjusts = 0   # cooldown: adjusts sin mejora consecutivos
 
     async def setup(self):
         print(f"[{self.id}] Setup iniciado")
@@ -39,7 +40,7 @@ class ClassifierAgent:
                 explainer.set_background(X)
 
         self.X_train, self.X_test, self.y_train, self.y_test = \
-            train_test_split(X, y, test_size=self.test_size)
+            train_test_split(X, y, test_size=self.test_size, random_state=42)
 
         log("Setup iniciado (train + eval inicial)", self.id)
         self._fit_and_evaluate(initial=True)
@@ -63,6 +64,13 @@ class ClassifierAgent:
     async def _handle_classify(self, msg, queues):
         instance  = msg.body["instance"]
         iteration = msg.body["iteration"]
+
+        # Invalidar explainers en cada clasificación para evitar caché estático
+        for exp in self.explainers:
+            if hasattr(exp, "invalidate"):
+                exp.invalidate()
+            elif hasattr(exp, "_explainer"):
+                exp._explainer = None
 
         log("Clasificando instancia", self.id)
         y_pred       = int(self.model.predict(instance)[0])
@@ -89,9 +97,8 @@ class ClassifierAgent:
             if vectors:
                 self.explanation_history.append(np.mean(vectors, axis=0))
 
-        response["iters_since_adjust"] = self._iters_since_adjust
         self._iters_since_adjust += 1
-        
+
         response = {
             "agent_id":    self.id,
             "iteration":   iteration,
@@ -105,6 +112,8 @@ class ClassifierAgent:
             "instance":   instance,
             "model_ref":  self.model
         }
+
+        response["iters_since_adjust"] = self._iters_since_adjust
 
         log("Clasificación completada", self.id)
         await queues["aggregator"].put(
@@ -130,13 +139,39 @@ class ClassifierAgent:
             self.id
         )
 
+        # ── Cooldown ───────────────────────────────────────────────────────
+        # Evita el ciclo: soft_adjust → re-entrena → frontera se mueve →
+        # predicción oscila → soft_adjust → ...
+        # Si el modelo lleva ≥3 adjusts consecutivos sin mejorar accuracy,
+        # se salta el re-entrenamiento.
+        if strategy in {"adjust", "force_adjust", "soft_adjust"}:
+            if len(self.metrics_history) >= 2:
+                delta = (self.metrics_history[-1]["accuracy"]
+                         - self.metrics_history[-2]["accuracy"])
+                if delta > 0.001:
+                    # Mejora real → resetear cooldown
+                    self._consecutive_adjusts = 0
+                else:
+                    self._consecutive_adjusts += 1
+            else:
+                self._consecutive_adjusts = 0
+
+            if self._consecutive_adjusts >= 3:
+                log(
+                    f"Cooldown activado ({self._consecutive_adjusts} adjusts "
+                    f"sin mejora) → skip re-entrenamiento",
+                    self.id
+                )
+                self._iters_since_adjust = 0
+                return  # no re-entrenar
+
+        # ── Ajuste del modelo ──────────────────────────────────────────────
         if hasattr(self.model, "adjust_from_feedback"):
             signals = {
                 "strategy":             strategy,
                 "reward":               evaluation.get("reward", 0.5),
                 "trend":                trend,
                 "global_trend":         global_trend,
-                # Señales de grupo
                 "group_pressure":       group_pressure,
                 "all_peers_struggling": all_peers_struggling,
                 "relative_position":    relative_position,
@@ -153,6 +188,7 @@ class ClassifierAgent:
             idx = np.random.permutation(len(self.X_train))
             self.model.fit(self.X_train[idx], self.y_train[idx])
 
+        # ── Invalidar explainers tras ajuste ──────────────────────────────
         if strategy in {"adjust", "force_adjust", "soft_adjust"}:
             for exp in self.explainers:
                 if hasattr(exp, "invalidate"):
@@ -192,8 +228,24 @@ class ClassifierAgent:
 
     def _generate_explanations(self, instance):
         explanations = []
-        for exp in self.explainers:
-            e = exp.explain(self.model, instance, 0)
+        
+        # ← AQUÍ falta generar las explicaciones antes del debug
+        for explainer in self.explainers:
+            try:
+                result = explainer.explain(self.model, instance)
+                if result:
+                    explanations.append(result)
+            except Exception as ex:
+                log(f"Error en explainer {explainer}: {ex}", self.id)
+
+        # Debug temporal
+        for e in explanations:
             if "details" in e and "values" in e["details"]:
-                explanations.append(e)
+                v = np.array(e["details"]["values"])
+                top3 = np.argsort(np.abs(v))[::-1][:3]
+                feature_names = e["details"].get("feature_names", [])
+                top3_names = [feature_names[i] for i in top3] if feature_names else top3.tolist()
+                print(f"[{self.id}] {e.get('explainer')}: top3={top3_names} | top3_idx={top3.tolist()}")
+                print(f"[{self.id}] {e.get('explainer')}: valores={np.round(v[top3], 4).tolist()}")
+
         return explanations

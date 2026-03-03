@@ -1,4 +1,3 @@
-# conflict_resolver.py
 import numpy as np
 from collections import deque
 
@@ -9,19 +8,21 @@ class ConflictResolver:
         self,
         low_q=0.25,
         high_q=0.75,
-        min_exp_quality=0.45,      # ← bajado de 0.50
+        min_exp_quality=0.45,
         min_stability=0.75,
         min_fidelity=0.0,
+        min_agreement=0.5,         # ← nuevo: SHAP y LIME deben coincidir
         consensus_stop=0.65,
-        satisfaction_window=4,     # ← bajado de 5
+        satisfaction_window=4,
         min_accuracy_stop=0.85,
-        warmup_iterations=5     # no votar parada durante calentamiento
-        ):
+        warmup_iterations=5
+    ):
         self.low_q               = low_q
         self.high_q              = high_q
         self.min_exp_quality     = min_exp_quality
         self.min_stability       = min_stability
         self.min_fidelity        = min_fidelity
+        self.min_agreement       = min_agreement
         self.consensus_stop      = consensus_stop
         self.satisfaction_window = satisfaction_window
         self.min_accuracy_stop   = min_accuracy_stop
@@ -49,6 +50,8 @@ class ConflictResolver:
             exp_d.get("fidelity",  np.full_like(exp_q, 0.5)), dtype=float)
         quality   = np.asarray(
             exp_d.get("quality",   exp_q), dtype=float)
+        agreement = np.asarray(
+            exp_d.get("agreement", np.full_like(exp_q, 1.0)), dtype=float)
 
         n = len(scores)
         for i in range(n):
@@ -65,20 +68,17 @@ class ConflictResolver:
         agent_satisfied  = []
         agent_votes_stop = []
 
-        for i, (s, c, e, stab, fid, q, acc) in enumerate(
-            zip(scores, conf, exp_q, stability, fidelity, quality, accuracy)
+        for i, (s, c, e, stab, fid, q, acc, agr) in enumerate(
+            zip(scores, conf, exp_q, stability, fidelity, quality, accuracy, agreement)
         ):
             self._score_history[i].append(s)
 
             # ── Decisión de ajuste ─────────────────────────────────────────
-            # force_adjust solo si accuracy también es baja — si el modelo
-            # ya clasifica bien, un adjust es suficiente para mejorar
-            # las explicaciones sin desestabilizarlo
             if c > 0.7 and e < self.min_exp_quality:
                 if acc < self.min_accuracy_stop:
                     decisions.append("force_adjust")
                 else:
-                    decisions.append("adjust")   # acc ok → ajuste suave
+                    decisions.append("adjust")
                 agent_satisfied.append(False)
                 self._satisfaction_history[i].append(False)
                 agent_votes_stop.append(False)
@@ -101,20 +101,27 @@ class ConflictResolver:
                 agent_votes_stop.append(False)
                 continue
 
-            # Decisión relativa al grupo
+            # ── Decisión relativa al grupo ─────────────────────────────────
             if s >= high:
                 decisions.append("keep")
             elif s <= low:
-                decisions.append("adjust")
+                # Solo adjust si tiene problemas reales, no solo por ser el peor
+                if q >= self.min_exp_quality and stab >= self.min_stability and acc >= self.min_accuracy_stop:
+                    decisions.append("soft_adjust")
+                else:
+                    decisions.append("adjust")
             else:
                 decisions.append("soft_adjust")
 
             # ── Satisfacción individual ────────────────────────────────────
+            # Incluye agreement: si SHAP y LIME no coinciden, el agente
+            # no está satisfecho aunque el resto de métricas sean buenas
             satisfied = (
-                q    >= self.min_exp_quality and
-                stab >= self.min_stability   and
-                fid  >= self.min_fidelity    and
-                acc  >= self.min_accuracy_stop
+                q    >= self.min_exp_quality  and
+                stab >= self.min_stability    and
+                fid  >= self.min_fidelity     and
+                acc  >= self.min_accuracy_stop and
+                agr  >= self.min_agreement     # ← nuevo criterio
             )
             agent_satisfied.append(satisfied)
             self._satisfaction_history[i].append(satisfied)
@@ -123,12 +130,11 @@ class ConflictResolver:
             history       = list(self._satisfaction_history[i])
             scores_window = list(self._score_history[i])
 
-            in_warmup    = self._iteration < self.warmup_iterations
-            window_full  = len(history) >= self.satisfaction_window
+            in_warmup     = self._iteration < self.warmup_iterations
+            window_full   = len(history) >= self.satisfaction_window
             all_satisfied = window_full and all(history)
             score_stable  = window_full and np.std(scores_window) < 0.08
 
-            # Durante calentamiento nunca votar parada
             votes_stop = (not in_warmup) and all_satisfied and score_stable
             agent_votes_stop.append(votes_stop)
 
@@ -148,6 +154,7 @@ class ConflictResolver:
                 "mean_consensus":      float(np.mean(consensus)),
                 "mean_stability":      float(np.mean(stability)),
                 "mean_fidelity":       float(np.mean(fidelity)),
+                "mean_agreement":      float(np.mean(agreement)),
                 "agent_satisfied":     agent_satisfied,
                 "agent_votes_stop":    agent_votes_stop,
                 "all_vote_stop":       all_vote_stop,

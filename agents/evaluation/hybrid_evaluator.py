@@ -6,11 +6,12 @@ class HybridEvaluator:
     Evaluador híbrido multi-métrica y explanation-aware.
 
     Métricas explicativas calculadas POR SEPARADO para cada explainer:
-    - consensus:  similitud coseno inter-agente
+    - consensus:  mínimo de similitud coseno inter-agente entre explainers
     - stability:  estabilidad temporal usando historial por tipo de explainer
     - fidelity:   sensibilidad de las top-features vs features aleatorias (escala-aware)
     - agreement:  acuerdo entre explainers del mismo agente (SHAP vs LIME)
-    - quality:    combinación ponderada de las cuatro anteriores
+    - quality:    combinación ponderada de las cuatro anteriores (pesos renormalizados
+                  en iter 0 cuando stability no tiene historial)
     """
 
     def __init__(
@@ -26,11 +27,10 @@ class HybridEvaluator:
         self.w_exp  = w_exp
         self.w_perf = w_perf
 
-        # Acumulador de instancias para estimar std por feature
         if background_data is not None:
             std = np.std(background_data, axis=0)
             self._feature_std = np.where(std > 1e-6, std, 1.0)
-            self._background = np.asarray(background_data, dtype=float)
+            self._background  = np.asarray(background_data, dtype=float)
         else:
             self._feature_std = None
             self._background  = None
@@ -53,11 +53,16 @@ class HybridEvaluator:
         majority = self._majority_vote(preds)
 
         S_pred = np.array([1.0 if p == majority else 0.0 for p in preds])
+
+        # _normalize: si todos los valores son iguales, devolver los valores
+        # reales en lugar de aplanar a 0.5
         S_conf = np.array(self._normalize(confs))
+
+        # _performance_scores: score absoluto, sin normalizar entre agentes
         S_perf = np.array(self._performance_scores(perfs))
 
         exp_result = self._explanation_quality_multi(
-            explanations_by_type, histories_by_type, instances, models, preds
+            explanations_by_type, histories_by_type, instances, models, preds, responses
         )
 
         S_exp = exp_result["quality"]
@@ -69,10 +74,8 @@ class HybridEvaluator:
             self.w_perf * S_perf
         )
 
-        # En evaluate(), después de calcular S_perf, añadir:
         S_acc = np.array([m.get("accuracy", 0.0) for m in perfs])
 
-        # Y en el return, dentro de components:
         return {
             "global_score":        float(scores.mean()),
             "majority_prediction": majority,
@@ -82,7 +85,7 @@ class HybridEvaluator:
                 "conf": S_conf.tolist(),
                 "perf": S_perf.tolist(),
                 "exp":  S_exp.tolist(),
-                "acc":  S_acc.tolist(),    # ← añadir esto
+                "acc":  S_acc.tolist(),
                 "exp_detail": {
                     "consensus":     exp_result["consensus"],
                     "stability":     exp_result["stability"],
@@ -98,30 +101,9 @@ class HybridEvaluator:
     # Feature std estimator
     # ======================================================
 
-    def _update_feature_std(self, instances):
-        """
-        Acumula instancias vistas y recalcula std por feature.
-        Con ≥5 instancias la estimación ya es útil.
-        """
-        for inst in instances:
-            if inst is not None:
-                self._instance_buffer.append(
-                    np.asarray(inst, dtype=float).flatten()
-                )
-
-        if len(self._instance_buffer) >= 2:
-            buf = np.stack(self._instance_buffer, axis=0)
-            std = np.std(buf, axis=0)
-            # Evitar std=0 (feature constante): fallback a 1.0
-            self._feature_std = np.where(std > 1e-6, std, 1.0)
-
     def _get_delta(self, feature_idx, n_features):
-        """
-        Delta de perturbación = 0.5 stds de la feature.
-        Si aún no hay estimación suficiente usa 0.5 como fallback.
-        """
         if self._feature_std is not None and feature_idx < len(self._feature_std):
-            return float(self._feature_std[feature_idx] * 0.5)
+            return float(self._feature_std[feature_idx] * 1.5)
         return 0.5
 
     # ======================================================
@@ -160,16 +142,22 @@ class HybridEvaluator:
     # ======================================================
 
     def _explanation_quality_multi(
-        self, explanations_by_type, histories_by_type, instances, models, preds
+        self, explanations_by_type, histories_by_type, instances, models, preds,
+        responses
     ):
         n = len(histories_by_type)
         explainer_names = list(explanations_by_type.keys())
 
-        per_explainer = {}
-        all_consensus = np.zeros(n)
-        all_stability = np.zeros(n)
-        all_fidelity  = np.zeros(n)
-        valid_count   = np.zeros(n)
+        iters_since_adjust = [r.get("iters_since_adjust", 99) for r in responses]
+
+        per_explainer  = {}
+        # Acumuladores por explainer para calcular el mínimo de consensus
+        consensus_per_explainer = {}   # name -> list of n values
+        all_stability  = np.zeros(n)
+        all_fidelity   = np.zeros(n)
+        valid_count    = np.zeros(n)
+        # Rastrear si cada agente tiene datos válidos en al menos un explainer
+        has_valid      = np.zeros(n, dtype=bool)
 
         for name in explainer_names:
             vectors = explanations_by_type[name]
@@ -178,9 +166,10 @@ class HybridEvaluator:
             if not valid:
                 per_explainer[name] = {
                     "consensus": [0.0] * n,
-                    "stability": [0.5] * n,
+                    "stability": [None] * n,
                     "fidelity":  [0.5] * n,
                 }
+                consensus_per_explainer[name] = [0.0] * n
                 continue
 
             center    = np.mean(valid, axis=0)
@@ -188,15 +177,21 @@ class HybridEvaluator:
                 self._cosine(v, center) if v is not None else 0.0
                 for v in vectors
             ]
+            consensus_per_explainer[name] = consensus
 
             stability = []
-            for v, hist_by_type in zip(vectors, histories_by_type):
+            for i, (v, hist_by_type) in enumerate(zip(vectors, histories_by_type)):
                 hist = hist_by_type.get(name, [])
                 if v is None or len(hist) == 0:
-                    stability.append(0.5)
+                    # Sin historial → None, se excluirá del cálculo de quality
+                    stability.append(None)
                 else:
-                    prev = np.mean(hist, axis=0)
-                    stability.append(self._cosine(v, prev))
+                    raw_stab = self._cosine(v, np.mean(hist, axis=0))
+                    # Dentro de 2 iters tras un ajuste, la inestabilidad es esperada
+                    if iters_since_adjust[i] <= 2:
+                        stability.append(max(raw_stab, 0.75))
+                    else:
+                        stability.append(raw_stab)
 
             fidelity = [
                 self._compute_fidelity(v, inst, model, pred)
@@ -211,28 +206,60 @@ class HybridEvaluator:
 
             for i, v in enumerate(vectors):
                 if v is not None:
-                    all_consensus[i] += consensus[i]
-                    all_stability[i] += stability[i]
+                    all_stability[i] += stability[i] if stability[i] is not None else 0.0
                     all_fidelity[i]  += fidelity[i]
                     valid_count[i]   += 1
+                    has_valid[i]      = True
+
+        # ── Consensus: mínimo entre explainers por agente ──────────────────
+        # Si un explainer da consensus bajo, el agente no merece score alto
+        min_consensus = np.ones(n)
+        for name, cons_list in consensus_per_explainer.items():
+            for i, c in enumerate(cons_list):
+                if explanations_by_type[name][i] is not None:
+                    min_consensus[i] = min(min_consensus[i], c)
+        mean_consensus = min_consensus.tolist()
 
         safe_count     = np.where(valid_count > 0, valid_count, 1)
-        mean_consensus = (all_consensus / safe_count).tolist()
-        mean_stability = (all_stability / safe_count).tolist()
-        mean_fidelity  = (all_fidelity  / safe_count).tolist()
+        mean_stability_arr = (all_stability / safe_count)
+        mean_fidelity      = (all_fidelity  / safe_count).tolist()
 
         agreement = self._compute_agreement(explanations_by_type, n)
 
-        quality = np.array([
-            0.30 * c + 0.25 * s + 0.30 * f + 0.15 * a
-            for c, s, f, a in zip(
-                mean_consensus, mean_stability, mean_fidelity, agreement
+        # ── Quality: pesos renormalizados si stability no tiene historial ──
+        quality = []
+        for i, (c, f, a) in enumerate(zip(mean_consensus, mean_fidelity, agreement)):
+            # Determinar si hay stability real para este agente
+            has_stability = any(
+                per_explainer[name]["stability"][i] is not None
+                for name in explainer_names
+                if name in per_explainer
+                    and explanations_by_type[name][i] is not None
             )
-        ])
+
+            if has_stability:
+                s = float(mean_stability_arr[i])
+                q = 0.30 * c + 0.25 * s + 0.30 * f + 0.15 * a
+            else:
+                # Sin historial: redistribuir el peso de stability (0.25)
+                # proporcionalmente entre consensus, fidelity y agreement
+                # Pesos originales sin stability: 0.30+0.30+0.15 = 0.75
+                # Renormalizados: c=0.40, f=0.40, a=0.20
+                q = 0.40 * c + 0.40 * f + 0.20 * a
+
+            quality.append(q)
+
+        quality = np.array(quality)
+
+        # Convertir stability a lista serializable (None → 0.5 para logging)
+        mean_stability_list = [
+            float(mean_stability_arr[i]) if has_valid[i] else 0.5
+            for i in range(n)
+        ]
 
         return {
             "consensus":     mean_consensus,
-            "stability":     mean_stability,
+            "stability":     mean_stability_list,
             "fidelity":      mean_fidelity,
             "agreement":     agreement,
             "quality":       quality,
@@ -251,25 +278,29 @@ class HybridEvaluator:
 
         agreement = []
         for i in range(n):
-            top_features = []
+            top_features_per_explainer = []
             for name in explainer_names:
                 v = explanations_by_type[name][i]
                 if v is not None and np.linalg.norm(v) > 1e-8:
-                    top_features.append(int(np.argmax(np.abs(v))))
+                    k = min(3, len(v))   # top-3 features
+                    top_k = set(np.argsort(np.abs(v))[::-1][:k].tolist())
+                    top_features_per_explainer.append(top_k)
 
-            if len(top_features) < 2:
+            if len(top_features_per_explainer) < 2:
                 agreement.append(0.5)
                 continue
 
-            pairs = matches = 0
-            for a in range(len(top_features)):
-                for b in range(a + 1, len(top_features)):
+            # Jaccard entre los conjuntos top-k de cada par de explainers
+            pairs = scores_sum = 0
+            for a in range(len(top_features_per_explainer)):
+                for b in range(a + 1, len(top_features_per_explainer)):
                     pairs += 1
-                    if top_features[a] == top_features[b]:
-                        matches += 1
+                    intersection = len(top_features_per_explainer[a] & top_features_per_explainer[b])
+                    union = len(top_features_per_explainer[a] | top_features_per_explainer[b])
+                    scores_sum += intersection / union if union > 0 else 0.0
 
-            agreement.append(matches / pairs)
-
+            agreement.append(scores_sum / pairs if pairs > 0 else 0.5)
+        
         return agreement
 
     # ======================================================
@@ -291,8 +322,6 @@ class HybridEvaluator:
             if not rest:
                 return 0.5
 
-            # Usar instancias del background como sujetos de perturbación
-            # → variedad garantizada, algunas cerca de la frontera
             if self._background is not None and len(self._background) >= 5:
                 idxs = np.random.choice(len(self._background), size=20, replace=False)
                 probe_set = self._background[idxs]
@@ -319,7 +348,7 @@ class HybridEvaluator:
 
             top_score  = mean_sensitivity(list(top_k))
             base_idxs  = np.random.choice(rest, size=min(k, len(rest)), replace=False)
-            base_score = mean_sensitivity(base_idxs.tolist()) + 0.05
+            base_score = mean_sensitivity(base_idxs.tolist()) + 1e-6
 
             ratio    = top_score / base_score
             fidelity = ratio / (ratio + 1.0)
@@ -334,6 +363,8 @@ class HybridEvaluator:
     # ======================================================
 
     def _performance_scores(self, metrics):
+        # Score absoluto en [0,1], sin normalizar entre agentes.
+        # Evita que un agente con 0.88 parezca "0.0" si otro tiene 0.90.
         scores = []
         for m in metrics:
             if not m:
@@ -345,7 +376,7 @@ class HybridEvaluator:
                 0.2 * m.get("precision", 0.0) +
                 0.1 * m.get("recall", 0.0)
             )
-        return self._normalize(scores)
+        return scores
 
     # ======================================================
     # Utils
@@ -357,7 +388,8 @@ class HybridEvaluator:
     def _normalize(self, values, eps=1e-8):
         v = np.array(values, dtype=float)
         if v.max() - v.min() < eps:
-            return [0.5] * len(v)
+            # Todos iguales: devolver valores reales, no aplanar a 0.5
+            return v.tolist()
         return ((v - v.min()) / (v.max() - v.min() + eps)).tolist()
 
     def _cosine(self, a, b, eps=1e-8):
