@@ -9,6 +9,29 @@ from visualization.logs import log
 from models.torch_model import TorchModel
 
 
+# ── Cooldown config ────────────────────────────────────────────────────────────
+# Peso que suma cada strategy al contador de cooldown.
+# force_adjust nunca bloquea; soft_adjust contribuye a la mitad.
+_COOLDOWN_WEIGHT = {
+    "force_adjust": 0,
+    "adjust":       1,
+    "soft_adjust":  0.5,
+}
+
+# Umbral de cooldown según clase de modelo.
+# Las redes necesitan más iteraciones para converger.
+_COOLDOWN_THRESHOLD = {
+    "TorchModel":               8,
+    "GradientBoostingModel":    5,
+    "RandomForest":             5,
+    "default":                  3,
+}
+
+# Cada cuántas iteraciones se "perdona" 1 punto del contador,
+# aunque no haya habido mejora real. Evita bloqueos permanentes.
+_COOLDOWN_DECAY_EVERY = 10
+
+
 class ClassifierAgent:
 
     def __init__(self, agent_id, model, explainers,
@@ -29,7 +52,13 @@ class ClassifierAgent:
         self.X_test  = self.y_test  = None
         self.running = True
         self._iters_since_adjust  = 0
-        self._consecutive_adjusts = 0   # cooldown: adjusts sin mejora consecutivos
+        self._consecutive_adjusts = 0.0   # ahora es float para pesos fraccionarios
+
+    # ── Umbral de cooldown dinámico según tipo de modelo ──────────────────
+    @property
+    def _cooldown_threshold(self):
+        class_name = self.model.__class__.__name__
+        return _COOLDOWN_THRESHOLD.get(class_name, _COOLDOWN_THRESHOLD["default"])
 
     async def setup(self):
         print(f"[{self.id}] Setup iniciado")
@@ -140,30 +169,50 @@ class ClassifierAgent:
         )
 
         # ── Cooldown ───────────────────────────────────────────────────────
-        # Evita el ciclo: soft_adjust → re-entrena → frontera se mueve →
-        # predicción oscila → soft_adjust → ...
-        # Si el modelo lleva ≥3 adjusts consecutivos sin mejorar accuracy,
-        # se salta el re-entrenamiento.
-        if strategy in {"adjust", "force_adjust", "soft_adjust"}:
-            if len(self.metrics_history) >= 2:
-                delta = (self.metrics_history[-1]["accuracy"]
-                         - self.metrics_history[-2]["accuracy"])
-                if delta > 0.001:
-                    # Mejora real → resetear cooldown
-                    self._consecutive_adjusts = 0
-                else:
-                    self._consecutive_adjusts += 1
-            else:
-                self._consecutive_adjusts = 0
+        if strategy in _COOLDOWN_WEIGHT:
+            weight    = _COOLDOWN_WEIGHT[strategy]
+            threshold = self._cooldown_threshold
 
-            if self._consecutive_adjusts >= 3:
-                log(
-                    f"Cooldown activado ({self._consecutive_adjusts} adjusts "
-                    f"sin mejora) → skip re-entrenamiento",
-                    self.id
-                )
-                self._iters_since_adjust = 0
-                return  # no re-entrenar
+            # force_adjust (weight=0) nunca activa ni respeta el cooldown
+            if weight == 0:
+                log("force_adjust → ignorando cooldown", self.id)
+            else:
+                # Decay periódico: cada N iters sin ajuste se perdona 1 punto
+                if (self.current_iteration > 0
+                        and self.current_iteration % _COOLDOWN_DECAY_EVERY == 0):
+                    old = self._consecutive_adjusts
+                    self._consecutive_adjusts = max(0.0, self._consecutive_adjusts - 1.0)
+                    if self._consecutive_adjusts < old:
+                        log(
+                            f"Cooldown decay aplicado: "
+                            f"{old:.1f} → {self._consecutive_adjusts:.1f}",
+                            self.id
+                        )
+
+                # Actualizar contador según mejora de accuracy
+                if len(self.metrics_history) >= 2:
+                    delta = (self.metrics_history[-1]["accuracy"]
+                             - self.metrics_history[-2]["accuracy"])
+                    if delta > 0.001:
+                        # Mejora real → reset completo
+                        self._consecutive_adjusts = 0.0
+                    else:
+                        # Sin mejora → sumar peso fraccionario según strategy
+                        self._consecutive_adjusts += weight
+                else:
+                    self._consecutive_adjusts = 0.0
+
+                # Verificar si debemos saltar el re-entrenamiento
+                if self._consecutive_adjusts >= threshold:
+                    log(
+                        f"Cooldown activado "
+                        f"({self._consecutive_adjusts:.1f}/{threshold} "
+                        f"[{self.model.__class__.__name__}]) "
+                        f"→ skip re-entrenamiento",
+                        self.id
+                    )
+                    self._iters_since_adjust = 0
+                    return
 
         # ── Ajuste del modelo ──────────────────────────────────────────────
         if hasattr(self.model, "adjust_from_feedback"):
@@ -228,8 +277,7 @@ class ClassifierAgent:
 
     def _generate_explanations(self, instance):
         explanations = []
-        
-        # ← AQUÍ falta generar las explicaciones antes del debug
+
         for explainer in self.explainers:
             try:
                 result = explainer.explain(self.model, instance)

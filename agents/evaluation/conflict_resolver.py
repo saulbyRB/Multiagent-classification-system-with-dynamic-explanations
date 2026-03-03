@@ -11,26 +11,29 @@ class ConflictResolver:
         min_exp_quality=0.45,
         min_stability=0.75,
         min_fidelity=0.0,
-        min_agreement=0.5,         # ← nuevo: SHAP y LIME deben coincidir
+        min_agreement=0.5,
         consensus_stop=0.65,
         satisfaction_window=4,
         min_accuracy_stop=0.85,
-        warmup_iterations=5
+        warmup_iterations=5,
+        max_disagreement_iters=6,   # ← nuevo: iters consecutivas discrepando → force_adjust
     ):
-        self.low_q               = low_q
-        self.high_q              = high_q
-        self.min_exp_quality     = min_exp_quality
-        self.min_stability       = min_stability
-        self.min_fidelity        = min_fidelity
-        self.min_agreement       = min_agreement
-        self.consensus_stop      = consensus_stop
-        self.satisfaction_window = satisfaction_window
-        self.min_accuracy_stop   = min_accuracy_stop
-        self.warmup_iterations   = warmup_iterations
+        self.low_q                  = low_q
+        self.high_q                 = high_q
+        self.min_exp_quality        = min_exp_quality
+        self.min_stability          = min_stability
+        self.min_fidelity           = min_fidelity
+        self.min_agreement          = min_agreement
+        self.consensus_stop         = consensus_stop
+        self.satisfaction_window    = satisfaction_window
+        self.min_accuracy_stop      = min_accuracy_stop
+        self.warmup_iterations      = warmup_iterations
+        self.max_disagreement_iters = max_disagreement_iters
 
-        self._satisfaction_history = {}
-        self._score_history        = {}
-        self._iteration            = 0
+        self._satisfaction_history  = {}
+        self._score_history         = {}
+        self._disagreement_streak   = {}   # ← contador de iters consecutivas discrepando
+        self._iteration             = 0
 
     def resolve(self, evaluation):
         scores   = np.asarray(evaluation["scores"],             dtype=float)
@@ -40,6 +43,9 @@ class ConflictResolver:
             evaluation["components"].get("acc", np.full_like(scores, 0.9)),
             dtype=float
         )
+        preds    = evaluation.get("majority_prediction", None)
+        # Predicciones individuales para detectar discrepancia
+        ind_preds = evaluation.get("individual_predictions", [None] * len(scores))
 
         exp_d     = evaluation["components"].get("exp_detail", {})
         consensus = np.asarray(
@@ -53,13 +59,25 @@ class ConflictResolver:
         agreement = np.asarray(
             exp_d.get("agreement", np.full_like(exp_q, 1.0)), dtype=float)
 
+        majority = evaluation.get("majority_prediction", None)
+
         n = len(scores)
         for i in range(n):
             if i not in self._satisfaction_history:
-                self._satisfaction_history[i] = deque(
-                    maxlen=self.satisfaction_window)
-                self._score_history[i] = deque(
-                    maxlen=self.satisfaction_window)
+                self._satisfaction_history[i] = deque(maxlen=self.satisfaction_window)
+                self._score_history[i]        = deque(maxlen=self.satisfaction_window)
+                self._disagreement_streak[i]  = 0
+
+        # ── Actualizar streaks de discrepancia ─────────────────────────────
+        # Necesitamos saber qué agentes discrepan de la mayoría esta iteración.
+        # ind_preds viene del evaluador; si no está disponible usamos S_pred < 0.5
+        # como proxy (S_pred ponderado por confianza: < 0.5 → discrepa).
+        S_pred = np.asarray(evaluation["components"].get("pred", [1.0] * n), dtype=float)
+        for i in range(n):
+            if S_pred[i] < 0.5:
+                self._disagreement_streak[i] += 1
+            else:
+                self._disagreement_streak[i] = 0
 
         low  = np.quantile(scores, self.low_q)
         high = np.quantile(scores, self.high_q)
@@ -73,7 +91,22 @@ class ConflictResolver:
         ):
             self._score_history[i].append(s)
 
-            # ── Decisión de ajuste ─────────────────────────────────────────
+            # ── Regla 0: discrepancia persistente ─────────────────────────
+            # Si el agente lleva >= max_disagreement_iters iteraciones
+            # consecutivas prediciendo diferente a la mayoría, force_adjust
+            # independientemente de sus otras métricas.
+            # Solo se aplica fuera del warmup para dar tiempo a estabilizarse.
+            in_warmup = self._iteration < self.warmup_iterations
+            streak    = self._disagreement_streak[i]
+
+            if not in_warmup and streak >= self.max_disagreement_iters:
+                decisions.append("force_adjust")
+                agent_satisfied.append(False)
+                self._satisfaction_history[i].append(False)
+                agent_votes_stop.append(False)
+                continue
+
+            # ── Regla 1: alta confianza + baja calidad explicativa ─────────
             if c > 0.7 and e < self.min_exp_quality:
                 if acc < self.min_accuracy_stop:
                     decisions.append("force_adjust")
@@ -84,6 +117,7 @@ class ConflictResolver:
                 agent_votes_stop.append(False)
                 continue
 
+            # ── Regla 2: alta confianza + baja fidelity ───────────────────
             if self.min_fidelity > 0 and c > 0.7 and fid < self.min_fidelity:
                 if acc < self.min_accuracy_stop:
                     decisions.append("force_adjust")
@@ -94,6 +128,7 @@ class ConflictResolver:
                 agent_votes_stop.append(False)
                 continue
 
+            # ── Regla 3: baja estabilidad ──────────────────────────────────
             if stab < self.min_stability:
                 decisions.append("adjust")
                 agent_satisfied.append(False)
@@ -105,7 +140,6 @@ class ConflictResolver:
             if s >= high:
                 decisions.append("keep")
             elif s <= low:
-                # Solo adjust si tiene problemas reales, no solo por ser el peor
                 if q >= self.min_exp_quality and stab >= self.min_stability and acc >= self.min_accuracy_stop:
                     decisions.append("soft_adjust")
                 else:
@@ -114,14 +148,13 @@ class ConflictResolver:
                 decisions.append("soft_adjust")
 
             # ── Satisfacción individual ────────────────────────────────────
-            # Incluye agreement: si SHAP y LIME no coinciden, el agente
-            # no está satisfecho aunque el resto de métricas sean buenas
             satisfied = (
-                q    >= self.min_exp_quality  and
-                stab >= self.min_stability    and
-                fid  >= self.min_fidelity     and
+                q    >= self.min_exp_quality   and
+                stab >= self.min_stability     and
+                fid  >= self.min_fidelity      and
                 acc  >= self.min_accuracy_stop and
-                agr  >= self.min_agreement     # ← nuevo criterio
+                agr  >= self.min_agreement     and
+                streak == 0                        # ← no satisfecho si discrepa
             )
             agent_satisfied.append(satisfied)
             self._satisfaction_history[i].append(satisfied)
@@ -130,7 +163,6 @@ class ConflictResolver:
             history       = list(self._satisfaction_history[i])
             scores_window = list(self._score_history[i])
 
-            in_warmup     = self._iteration < self.warmup_iterations
             window_full   = len(history) >= self.satisfaction_window
             all_satisfied = window_full and all(history)
             score_stable  = window_full and np.std(scores_window) < 0.08
@@ -151,14 +183,15 @@ class ConflictResolver:
             "decisions": decisions,
             "stop":      bool(stop),
             "diagnostics": {
-                "mean_consensus":      float(np.mean(consensus)),
-                "mean_stability":      float(np.mean(stability)),
-                "mean_fidelity":       float(np.mean(fidelity)),
-                "mean_agreement":      float(np.mean(agreement)),
-                "agent_satisfied":     agent_satisfied,
-                "agent_votes_stop":    agent_votes_stop,
-                "all_vote_stop":       all_vote_stop,
-                "global_consensus_ok": global_consensus,
-                "iteration":           self._iteration,
+                "mean_consensus":        float(np.mean(consensus)),
+                "mean_stability":        float(np.mean(stability)),
+                "mean_fidelity":         float(np.mean(fidelity)),
+                "mean_agreement":        float(np.mean(agreement)),
+                "agent_satisfied":       agent_satisfied,
+                "agent_votes_stop":      agent_votes_stop,
+                "all_vote_stop":         all_vote_stop,
+                "global_consensus_ok":   global_consensus,
+                "disagreement_streaks":  [self._disagreement_streak[i] for i in range(n)],
+                "iteration":             self._iteration,
             }
         }
