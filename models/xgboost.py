@@ -1,88 +1,66 @@
-# xgboost_model.py
 import numpy as np
-from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, f1_score
 from models.sklearn_model import SklearnModel
+from models.mentor import MentorMixin
+
+try:
+    from xgboost import XGBClassifier
+    XGB_AVAILABLE = True
+except ImportError:
+    XGB_AVAILABLE = False
+    print("[xgboost] XGBoost no disponible, usando GradientBoostingClassifier como fallback")
+    from sklearn.ensemble import GradientBoostingClassifier as XGBClassifier
 
 
-class XGBoostModel(SklearnModel):
+class XGBoostModel(SklearnModel, MentorMixin):
 
     def __init__(self, n_estimators=100, learning_rate=0.1,
-                 max_depth=6, subsample=0.8, colsample_bytree=0.8, **kwargs):
-        super().__init__(
-            XGBClassifier(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                max_depth=max_depth,
-                subsample=subsample,
-                colsample_bytree=colsample_bytree,
-                use_label_encoder=False,
-                eval_metric="logloss",
-                **kwargs
-            )
-        )
-        self.hyperparams = {
-            "n_estimators":   n_estimators,
-            "learning_rate":  learning_rate,
-            "max_depth":      max_depth,
-            "subsample":      subsample,
-            "colsample_bytree": colsample_bytree,
-        }
+                 max_depth=3, use_label_encoder=False, eval_metric="mlogloss", **kwargs):
+        if XGB_AVAILABLE:
+            model = XGBClassifier(n_estimators=n_estimators, learning_rate=learning_rate,
+                                  max_depth=max_depth, use_label_encoder=use_label_encoder,
+                                  eval_metric=eval_metric, **kwargs)
+        else:
+            model = XGBClassifier(n_estimators=n_estimators, learning_rate=learning_rate,
+                                  max_depth=max_depth, **kwargs)
+        super().__init__(model)
+        self.hyperparams = {"n_estimators": n_estimators,
+                            "learning_rate": learning_rate,
+                            "max_depth": max_depth}
         self.reward_history = []
-        self._lr_direction = 1  # +1 bajando lr, -1 subiéndola
 
     def evaluate_performance(self, X, y):
-        y_pred = self.model.predict(X)
-        acc = accuracy_score(y, y_pred)
-        f1  = f1_score(y, y_pred, average="weighted")
-        return 0.6 * acc + 0.4 * f1
+        yp = self.model.predict(X)
+        return 0.7 * accuracy_score(y, yp) + 0.3 * f1_score(y, yp, average="weighted")
 
     def adjust_from_feedback(self, signals, X_train, y_train, X_test, y_test):
-        reward   = self.evaluate_performance(X_test, y_test)
-        trend    = signals.get("trend", 0.0)
-        strategy = signals.get("strategy", "adjust")
-
+        strategy      = signals.get("strategy", "adjust")
+        trend         = signals.get("trend", 0.0)
+        mentor_vector = signals.get("mentor_vector", None)
+        instance      = signals.get("instance", None)
+        target_pred   = signals.get("target_pred", None)
+        reward = self.evaluate_performance(X_test, y_test)
         self.reward_history.append(reward)
-
         if strategy == "keep":
-            print("[AdvancedXGB] keep → sin ajuste")
             return
-
-        base_factor = 1.03
         if len(self.reward_history) >= 2:
             delta = self.reward_history[-1] - self.reward_history[-2]
-            adaptive_factor = base_factor * (1.0 + np.tanh(-delta * 4))
-            adaptive_factor = np.clip(adaptive_factor, 1.01, 1.15)
+            factor = float(np.clip(1.0 + np.tanh(abs(delta) * 3) * 0.15, 1.01, 1.2))
         else:
-            adaptive_factor = base_factor
-
-        factor = adaptive_factor if strategy == "adjust" else (1 + (adaptive_factor - 1) / 2)
-
-        # Si empeora según el aggregator, invertir dirección del lr
+            factor = 1.05
         if trend < -0.05:
-            self._lr_direction *= -1
-            print(f"[AdvancedXGB] Tendencia negativa ({trend:+.3f}) → "
-                  f"invirtiendo dirección lr")
-
-        self.hyperparams["n_estimators"] = min(
-            int(self.hyperparams["n_estimators"] * factor), 400
-        )
-        self.hyperparams["max_depth"] = min(
-            max(int(self.hyperparams["max_depth"] * factor), 3), 12
-        )
-
-        if self._lr_direction > 0:
-            new_lr = self.hyperparams["learning_rate"] / factor
+            factor = 1.0 + (factor - 1.0) * 0.3
+        if strategy == "soft_adjust":
+            factor = 1.0 + (factor - 1.0) * 0.5
+        hp = self.hyperparams
+        hp["n_estimators"]  = int(np.clip(hp["n_estimators"] * factor, 10, 500))
+        hp["learning_rate"] = float(np.clip(hp["learning_rate"] / factor, 0.001, 0.5))
+        hp["max_depth"]     = int(np.clip(hp["max_depth"], 2, 10))
+        self.model.set_params(**{k: v for k, v in hp.items()})
+        if mentor_vector is not None and instance is not None and target_pred is not None:
+            print(f"[XGB] Fine-tune con mentor | target={target_pred}")
+            X_f, y_f, w_f = self._build_mentor_dataset(X_train, y_train, instance, target_pred, mentor_vector)
+            self.model.fit(X_f, y_f, sample_weight=w_f)
         else:
-            new_lr = self.hyperparams["learning_rate"] * factor
-
-        self.hyperparams["learning_rate"] = float(np.clip(new_lr, 0.01, 0.9))
-
-        self.model.set_params(**self.hyperparams)
-        self.model.fit(X_train, y_train)
-
-        print(f"[AdvancedXGB] Ajuste (factor={adaptive_factor:.3f}) | "
-              f"n_estimators={self.hyperparams['n_estimators']} | "
-              f"lr={self.hyperparams['learning_rate']:.4f} | "
-              f"depth={self.hyperparams['max_depth']} | "
-              f"dir={'↓' if self._lr_direction > 0 else '↑'}")
+            self.model.fit(X_train, y_train)
+        print(f"[XGB] n_est={hp['n_estimators']} lr={hp['learning_rate']:.4f} mentor={mentor_vector is not None}")

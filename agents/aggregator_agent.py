@@ -15,8 +15,8 @@ class AggregatorAgent:
         self.classifier_ids = classifier_ids
         self.max_iterations = max_iterations
 
-        self.evaluator       = HybridEvaluator(background_data=background_data)
-        self.resolver        = ConflictResolver()
+        self.evaluator        = HybridEvaluator(background_data=background_data)
+        self.resolver         = ConflictResolver()
         self.feedback_builder = FeedbackBuilder()
 
         self.inbox             = asyncio.Queue()
@@ -82,13 +82,13 @@ class AggregatorAgent:
 
             # ── Historial ──────────────────────────────────────────────────
             self.global_history.append({
-                "iteration":  self.current_iteration,
-                "responses":  responses,
-                "evaluation": evaluation,
-                "decisions":  decisions,
-                "trends":     trends,
+                "iteration":   self.current_iteration,
+                "responses":   responses,
+                "evaluation":  evaluation,
+                "decisions":   decisions,
+                "trends":      trends,
                 "diagnostics": diagnostics,
-                "stop":       stop
+                "stop":        stop
             })
 
             if stop:
@@ -96,23 +96,41 @@ class AggregatorAgent:
                       f"{self.current_iteration} → terminación anticipada")
                 break
 
+            # ── Identificar mentor ─────────────────────────────────────────
+            log("Buscando mentor", "AGGREGATOR")
+            mentor_vector, mentor_ids = self.feedback_builder.find_mentor(
+                responses, evaluation
+            )
+            if mentor_ids:
+                log(f"Mentor(s) encontrado(s): {mentor_ids}", "AGGREGATOR")
+            else:
+                log("Sin mentor esta iteración (ningún agente cumple umbrales)",
+                    "AGGREGATOR")
+
             # ── Feedback ───────────────────────────────────────────────────
             log("Calculando feedback global", "AGGREGATOR")
             for idx, (cid, decision) in enumerate(
                 zip(self.classifier_ids, decisions)
             ):
-                feedback = self.feedback_builder.build(
+                feedback = self.feedback_builder.build_with_mentor(
                     agent_id=cid,
                     decision=decision,
                     evaluation=evaluation,
                     explanations=responses[idx].get("explanations", []),
-                    idx=idx
+                    idx=idx,
+                    mentor_vector=mentor_vector,
+                    mentor_ids=mentor_ids
                 )
 
                 feedback["action"]       = "feedback"
                 feedback["iteration"]    = self.current_iteration
                 feedback["trend"]        = trends[idx]
                 feedback["global_trend"] = global_trend
+
+                # Pasar también la instancia y la predicción mayoritaria
+                # para que los modelos puedan hacer fine-tune dirigido
+                feedback["instance"]      = self.instance
+                feedback["target_pred"]   = evaluation["majority_prediction"]
 
                 await queues[cid].put(
                     Message(sender="aggregator", body=feedback)

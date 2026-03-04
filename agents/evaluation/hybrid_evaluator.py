@@ -22,13 +22,20 @@ class HybridEvaluator:
                   difiere de la mayoría.
     """
 
+    # ── Penalización drástica por exp_quality baja sostenida ────────────────────
+    # Si un agente lleva N iters consecutivas con exp_quality < umbral,
+    # su score se multiplica por un factor severo → force_adjust orgánico.
+    EXP_QUALITY_PENALTY_THRESHOLD = 0.55
+    EXP_QUALITY_PENALTY_WINDOW    = 5
+    EXP_QUALITY_PENALTY_FACTOR    = 0.45
+
     def __init__(
         self,
-        w_pred=0.25,
-        w_conf=0.10,
-        w_exp=0.30,
-        w_perf=0.20,
-        w_instance=0.15,       # ← nuevo peso para S_instance
+        w_pred=0.10,       # última prioridad: no castigar disenso informado
+        w_conf=0.05,       # auxiliar
+        w_exp=0.40,        # primera prioridad: calidad explicaciones
+        w_perf=0.20,       # cuarta: accuracy/f1 global
+        w_instance=0.25,   # tercera: coherencia local + agreement implícito
         background_data=None
     ):
         self.w_pred     = w_pred
@@ -37,13 +44,17 @@ class HybridEvaluator:
         self.w_perf     = w_perf
         self.w_instance = w_instance
 
-        # Normalizar pesos por si acaso no suman 1
+        # Normalizar pesos
         total = w_pred + w_conf + w_exp + w_perf + w_instance
         self.w_pred     /= total
         self.w_conf     /= total
         self.w_exp      /= total
         self.w_perf     /= total
         self.w_instance /= total
+
+        # Historial de exp_quality baja por agente (índice posicional)
+        # {agent_idx → racha_consecutiva_baja}
+        self._low_quality_streak = {}
 
         if background_data is not None:
             std = np.std(background_data, axis=0)
@@ -68,7 +79,18 @@ class HybridEvaluator:
         instances = [r.get("instance", None) for r in responses]
         models    = [r.get("model_ref", None) for r in responses]
 
-        majority = self._majority_vote(preds)
+        # ── Weighted majority: pondera por accuracy x confidence ─────────
+        # Un agente con alta accuracy y alta confianza tiene mas peso
+        # que varios agentes mediocres que coinciden. Crucial en instancias
+        # frontera donde la mayoria simple es poco fiable.
+        accs     = [m.get("accuracy", 0.5) for m in perfs]
+        # exp_quality no disponible aún en este punto — se calcula después.
+        # Usamos fidelity del historial previo si está disponible, o 0.5.
+        prev_fids = [
+            r.get("metrics", {}).get("exp_fidelity", 0.5)
+            for r in responses
+        ]
+        majority = self._weighted_majority_vote(preds, accs, confs, prev_fids)
 
         # ── S_pred: alineación con mayoría ponderada por confianza ────────
         # Si acierto con alta confianza → premio extra
@@ -77,7 +99,8 @@ class HybridEvaluator:
         S_pred = self._compute_S_pred(preds, confs, majority)
 
         S_conf = np.array(self._normalize(confs))
-        S_perf = np.array(self._performance_scores(perfs))
+        perfs_prev = [r.get("metrics_prev", None) for r in responses]
+        S_perf = np.array(self._performance_scores(perfs, perfs_prev))
 
         exp_result = self._explanation_quality_multi(
             explanations_by_type, histories_by_type, instances, models, preds, responses
@@ -96,6 +119,29 @@ class HybridEvaluator:
             self.w_perf     * S_perf     +
             self.w_instance * S_instance
         )
+
+        # ── Penalización drástica por exp_quality baja sostenida ─────────────
+        # Si un agente lleva EXP_QUALITY_PENALTY_WINDOW iteraciones consecutivas
+        # con exp_quality < EXP_QUALITY_PENALTY_THRESHOLD, se aplica
+        # EXP_QUALITY_PENALTY_FACTOR sobre su score final.
+        # Esto permite que force_adjust emerja orgánicamente sin reglas ad hoc,
+        # respetando la jerarquía: exp_quality > acc_global > pred_local.
+        agent_ids = [r.get("agent_id", i) for i, r in enumerate(responses)]
+        for i, (aid, eq) in enumerate(zip(agent_ids, S_exp)):
+            streak = self._low_quality_streak.get(aid, 0)
+            if eq < self.EXP_QUALITY_PENALTY_THRESHOLD:
+                streak += 1
+            else:
+                streak = 0
+            self._low_quality_streak[aid] = streak
+
+            if streak >= self.EXP_QUALITY_PENALTY_WINDOW:
+                import logging
+                logging.debug(
+                    f"[HybridEvaluator] {aid}: exp_quality baja x{streak} iters "
+                    f"(eq={eq:.3f}) → penalización drástica ×{self.EXP_QUALITY_PENALTY_FACTOR}"
+                )
+                scores[i] *= self.EXP_QUALITY_PENALTY_FACTOR
 
         S_acc = np.array([m.get("accuracy", 0.0) for m in perfs])
 
@@ -428,11 +474,32 @@ class HybridEvaluator:
                 if name in per_explainer
                     and explanations_by_type[name][i] is not None
             )
+
+            # ── Penalización suave por desacuerdo informado ───────────────
+            # Si los explainers tienen fidelity alta de forma independiente
+            # pero no coinciden en features, el desacuerdo refleja que el
+            # modelo genuinamente tiene múltiples features relevantes desde
+            # perspectivas distintas (gradientes vs sensibilidad local).
+            # En ese caso penalizamos menos que si el desacuerdo viniera
+            # de explicaciones de baja calidad.
+            per_exp_fids = [
+                per_explainer[name]["fidelity"][i]
+                for name in explainer_names
+                if name in per_explainer
+                   and explanations_by_type[name][i] is not None
+            ]
+            mean_per_exp_fid = float(np.mean(per_exp_fids)) if per_exp_fids else f
+            # Desacuerdo informado: fidelity individual alta pero agreement bajo
+            informed_disagreement = mean_per_exp_fid > 0.65 and a < 0.35
+            # Factor de moderación: si el desacuerdo es informado, a_effective
+            # se eleva parcialmente hacia 0.5 en lugar de castigar con a real.
+            a_effective = (0.5 * a + 0.5 * 0.45) if informed_disagreement else a
+
             if has_stability:
                 s = float(mean_stability_arr[i])
-                q = 0.30 * c + 0.25 * s + 0.30 * f + 0.15 * a
+                q = 0.30 * c + 0.25 * s + 0.30 * f + 0.15 * a_effective
             else:
-                q = 0.40 * c + 0.40 * f + 0.20 * a
+                q = 0.40 * c + 0.40 * f + 0.20 * a_effective
             quality.append(q)
 
         quality = np.array(quality)
@@ -456,34 +523,57 @@ class HybridEvaluator:
     # ======================================================
 
     def _compute_agreement(self, explanations_by_type, n):
+        """
+        Acuerdo inter-explainer con similitud ponderada por rango.
+
+        Reemplaza Jaccard top-k binario por una métrica gradual que da
+        crédito parcial cuando los explainers identifican features distintas
+        pero igualmente válidas — caso típico cuando SHAP mide gradientes
+        internos y LIME mide sensibilidad local de la frontera.
+
+        Método: rank-weighted overlap.
+          - Cada feature recibe peso 1/rank (rank 1 = top feature).
+          - Score = Σ min(w_a[f], w_b[f]) / Σ max(w_a[f], w_b[f])
+          - Si ambos coinciden en top-1 → score alto.
+          - Si identifican features distintas pero ambas con fidelity alta
+            → score medio (no cero), reflejando incertidumbre legítima.
+          - Score=0 solo si no comparten ninguna feature en top-k.
+        """
         explainer_names = list(explanations_by_type.keys())
 
         if len(explainer_names) < 2:
             return [1.0] * n
 
+        def rank_weights(v, k=5):
+            """Devuelve dict {feature_idx: 1/rank} para top-k features."""
+            indices = np.argsort(np.abs(v))[::-1][:k]
+            weights = [1.0, 0.5, 0.25, 0.125, 0.0625]  # decaimiento geométrico
+            return {int(idx): weights[rank] for rank, idx in enumerate(indices)}
+
         agreement = []
         for i in range(n):
-            top_features_per_explainer = []
+            weighted_vecs = []
             for name in explainer_names:
                 v = explanations_by_type[name][i]
                 if v is not None and np.linalg.norm(v) > 1e-8:
-                    k     = min(3, len(v))
-                    top_k = set(np.argsort(np.abs(v))[::-1][:k].tolist())
-                    top_features_per_explainer.append(top_k)
+                    weighted_vecs.append(rank_weights(v, k=5))
 
-            if len(top_features_per_explainer) < 2:
+            if len(weighted_vecs) < 2:
                 agreement.append(0.5)
                 continue
 
             pairs = scores_sum = 0
-            for a in range(len(top_features_per_explainer)):
-                for b in range(a + 1, len(top_features_per_explainer)):
+            for a in range(len(weighted_vecs)):
+                for b in range(a + 1, len(weighted_vecs)):
                     pairs += 1
-                    intersection = len(
-                        top_features_per_explainer[a] & top_features_per_explainer[b])
-                    union = len(
-                        top_features_per_explainer[a] | top_features_per_explainer[b])
-                    scores_sum += intersection / union if union > 0 else 0.0
+                    all_feats = set(weighted_vecs[a]) | set(weighted_vecs[b])
+                    numerator   = sum(min(weighted_vecs[a].get(f, 0),
+                                         weighted_vecs[b].get(f, 0))
+                                      for f in all_feats)
+                    denominator = sum(max(weighted_vecs[a].get(f, 0),
+                                         weighted_vecs[b].get(f, 0))
+                                      for f in all_feats)
+                    scores_sum += numerator / denominator if denominator > 0 else 0.0
 
             agreement.append(scores_sum / pairs if pairs > 0 else 0.5)
 
@@ -548,18 +638,54 @@ class HybridEvaluator:
     # Métricas clásicas
     # ======================================================
 
-    def _performance_scores(self, metrics):
+    def _performance_scores(self, metrics, metrics_prev=None):
+        """
+        Score de rendimiento con penalización por degradación.
+
+        Base:     0.4·f1_macro + 0.3·accuracy + 0.2·precision_w + 0.1·recall_w
+        Penalty:  por cada métrica que baja respecto a la iteración anterior,
+                  se aplica un descuento proporcional a la caída.
+                  La penalización total se escala por severidad:
+                    - caída < 0.02  → penalización suave  (×1.0)
+                    - caída < 0.05  → penalización media   (×2.0)
+                    - caída ≥ 0.05  → penalización severa  (×3.5)
+        """
+        _METRIC_WEIGHTS = {
+            "accuracy":  0.30,
+            "f1":        0.40,
+            "precision": 0.20,
+            "recall":    0.10,
+        }
+        _SEVERITY = [(0.02, 1.0), (0.05, 2.0), (float("inf"), 3.5)]
+
+        if metrics_prev is None:
+            metrics_prev = [None] * len(metrics)
+
         scores = []
-        for m in metrics:
+        for m, m_prev in zip(metrics, metrics_prev):
             if not m:
                 scores.append(0.0)
                 continue
-            scores.append(
-                0.4 * m.get("f1", 0.0) +
-                0.3 * m.get("accuracy", 0.0) +
-                0.2 * m.get("precision", 0.0) +
-                0.1 * m.get("recall", 0.0)
-            )
+
+            base = sum(w * m.get(k, 0.0) for k, w in _METRIC_WEIGHTS.items())
+
+            penalty = 0.0
+            if m_prev:
+                for k, w in _METRIC_WEIGHTS.items():
+                    delta = m_prev.get(k, 0.0) - m.get(k, 0.0)  # positivo = degradación
+                    if delta > 0:
+                        # escalar según severidad
+                        scale = next(s for thr, s in _SEVERITY if delta < thr)
+                        penalty += w * delta * scale
+
+            score = max(0.0, base - penalty)
+            if m_prev and penalty > 0:
+                import logging
+                logging.debug(
+                    f"[S_perf] degradación detectada | "
+                    f"base={base:.4f} penalty={penalty:.4f} score={score:.4f}"
+                )
+            scores.append(score)
         return scores
 
     # ======================================================
@@ -568,6 +694,46 @@ class HybridEvaluator:
 
     def _majority_vote(self, preds):
         return max(set(preds), key=preds.count)
+
+    def _weighted_majority_vote(self, preds, accs, confs, fids=None):
+        """
+        Voto ponderado por accuracy × confidence × fidelity_explicativa.
+
+        Incorporar fidelity evita que un modelo con acc alta pero explicaciones
+        poco fieles domine el voto. Un modelo que predice bien pero no puede
+        justificar su predicción (fidelity baja) recibe menos peso.
+
+        Peso = acc × conf × fidelity_factor
+        donde fidelity_factor = 0.5 + 0.5 × fidelity  (rango [0.5, 1.0])
+        — factor suave para no penalizar demasiado en la primera iteración.
+
+        Si todos los pesos son iguales (eps), cae al conteo simple.
+        """
+        if fids is None:
+            fids = [0.5] * len(preds)
+
+        vote_weights = {}
+        for pred, acc, conf, fid in zip(preds, accs, confs, fids):
+            # fidelity_factor en [0.5, 1.0] — penalización suave
+            fid_factor = 0.5 + 0.5 * float(fid)
+            w = float(acc) * float(conf) * fid_factor
+            vote_weights[pred] = vote_weights.get(pred, 0.0) + w
+
+        total = sum(vote_weights.values())
+        if total < 1e-8:
+            return max(set(preds), key=preds.count)
+
+        winner = max(vote_weights, key=vote_weights.get)
+
+        # Log informativo cuando el ganador difiere de la mayoria simple
+        simple = max(set(preds), key=preds.count)
+        if winner != simple:
+            pesos = {pred: round(weight / total, 2) for pred, weight in vote_weights.items()}
+            print(f"[WeightedVote] Mayoria simple={simple} | "
+                f"Mayoria ponderada={winner} | "
+                f"pesos={pesos}")
+
+        return winner
 
     def _normalize(self, values, eps=1e-8):
         v = np.array(values, dtype=float)

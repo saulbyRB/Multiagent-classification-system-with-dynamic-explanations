@@ -16,7 +16,7 @@ class ConflictResolver:
         satisfaction_window=4,
         min_accuracy_stop=0.85,
         warmup_iterations=5,
-        max_disagreement_iters=6,   # ← nuevo: iters consecutivas discrepando → force_adjust
+        max_disagreement_iters=6,   # iters consecutivas discrepando → force_adjust
     ):
         self.low_q                  = low_q
         self.high_q                 = high_q
@@ -32,7 +32,7 @@ class ConflictResolver:
 
         self._satisfaction_history  = {}
         self._score_history         = {}
-        self._disagreement_streak   = {}   # ← contador de iters consecutivas discrepando
+        self._disagreement_streak   = {}   # contador de iters consecutivas discrepando
         self._iteration             = 0
 
     def resolve(self, evaluation):
@@ -69,7 +69,6 @@ class ConflictResolver:
                 self._disagreement_streak[i]  = 0
 
         # ── Actualizar streaks de discrepancia ─────────────────────────────
-        # Necesitamos saber qué agentes discrepan de la mayoría esta iteración.
         # ind_preds viene del evaluador; si no está disponible usamos S_pred < 0.5
         # como proxy (S_pred ponderado por confianza: < 0.5 → discrepa).
         S_pred = np.asarray(evaluation["components"].get("pred", [1.0] * n), dtype=float)
@@ -99,8 +98,21 @@ class ConflictResolver:
             in_warmup = self._iteration < self.warmup_iterations
             streak    = self._disagreement_streak[i]
 
+            # Un agente de alta calidad que discrepa persistentemente
+            # NO recibe force_adjust: su disenso puede ser informativo,
+            # especialmente en instancias frontera donde la mayoría es
+            # poco fiable. Solo se penaliza si además tiene baja calidad.
+            high_quality_dissenter = (
+                acc >= self.min_accuracy_stop and
+                q   >= self.min_exp_quality   and
+                fid >= 0.70
+            )
             if not in_warmup and streak >= self.max_disagreement_iters:
-                decisions.append("force_adjust")
+                if high_quality_dissenter:
+                    # Disenso informado: soft_adjust como máximo
+                    decisions.append("soft_adjust")
+                else:
+                    decisions.append("force_adjust")
                 agent_satisfied.append(False)
                 self._satisfaction_history[i].append(False)
                 agent_votes_stop.append(False)
@@ -154,7 +166,7 @@ class ConflictResolver:
                 fid  >= self.min_fidelity      and
                 acc  >= self.min_accuracy_stop and
                 agr  >= self.min_agreement     and
-                streak == 0                        # ← no satisfecho si discrepa
+                streak == 0                        # no satisfecho si discrepa
             )
             agent_satisfied.append(satisfied)
             self._satisfaction_history[i].append(satisfied)
