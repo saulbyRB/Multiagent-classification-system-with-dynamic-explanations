@@ -1,3 +1,4 @@
+
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, f1_score
@@ -117,3 +118,4 @@ class RandomForest(SklearnModel, MentorMixin):
               f"seed={seed} mentor={mentor_vector is not None}")
 
         self._iter += 1
+

@@ -11,7 +11,6 @@ except ImportError:
     print("[xgboost] XGBoost no disponible, usando GradientBoostingClassifier como fallback")
     from sklearn.ensemble import GradientBoostingClassifier as XGBClassifier
 
-
 class XGBoostModel(SklearnModel, MentorMixin):
 
     def __init__(self, n_estimators=100, learning_rate=0.1,
@@ -64,3 +63,4 @@ class XGBoostModel(SklearnModel, MentorMixin):
         else:
             self.model.fit(X_train, y_train)
         print(f"[XGB] n_est={hp['n_estimators']} lr={hp['learning_rate']:.4f} mentor={mentor_vector is not None}")
+

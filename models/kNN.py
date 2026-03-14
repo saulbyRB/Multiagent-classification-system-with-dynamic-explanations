@@ -1,3 +1,4 @@
+
 import numpy as np
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
@@ -49,3 +50,5 @@ class KNNModel(SklearnModel, MentorMixin):
         else:
             self.model.fit(X_train, y_train)
         print(f"[kNN] k={self.hyperparams['n_neighbors']} mentor={mentor_vector is not None}")
+
+

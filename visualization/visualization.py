@@ -521,3 +521,4 @@ def print_experiment_summary(df: pd.DataFrame,
         sub  = df[df["agent"] == agent_id]
         corr = sub["shap_consensus"].corr(sub["lime_consensus"])
         print(f"  {agent_id}: r={corr:.3f}")
+

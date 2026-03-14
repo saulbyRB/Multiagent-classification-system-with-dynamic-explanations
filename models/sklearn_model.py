@@ -1,9 +1,7 @@
-# models/sklearn_model.py
 
 import numpy as np
 from sklearn.base import BaseEstimator
 from models.base_model import BaseModel
-
 
 class SklearnModel(BaseModel):
     """
@@ -108,4 +106,3 @@ class SklearnModel(BaseModel):
             "lime": True,
             "counterfactual": True
         }
-
