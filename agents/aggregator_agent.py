@@ -98,7 +98,7 @@ class AggregatorAgent:
 
             # ── Identificar mentor ─────────────────────────────────────────
             log("Buscando mentor", "AGGREGATOR")
-            mentor_vector, mentor_ids = self.feedback_builder.find_mentor(
+            mentor_vector, mentor_ids, is_dissent = self.feedback_builder.find_mentor(
                 responses, evaluation
             )
             if mentor_ids:
@@ -119,7 +119,8 @@ class AggregatorAgent:
                     explanations=responses[idx].get("explanations", []),
                     idx=idx,
                     mentor_vector=mentor_vector,
-                    mentor_ids=mentor_ids
+                    mentor_ids=mentor_ids,
+                    is_dissent_mentor=is_dissent
                 )
 
                 feedback["action"]       = "feedback"

@@ -190,8 +190,9 @@ class ClassifierAgent:
         all_peers_struggling = group_signals.get("all_peers_struggling", False)
         relative_position    = group_signals.get("relative_position", 0.0)
 
-        # Extraer mentor_vector si existe y este agente no es mentor
-        mentor_vector = None
+        # Extraer mentor_vector e is_dissent_mentor si existe y este agente no es mentor
+        mentor_vector    = None
+        is_dissent_mentor = peer_guidance.get("is_dissent_mentor", False)
         if peer_guidance.get("has_mentor"):
             raw = peer_guidance.get("mentor_vector")
             if raw is not None:
@@ -265,6 +266,7 @@ class ClassifierAgent:
                 "mentor_vector":        mentor_vector,
                 "instance":             instance,
                 "target_pred":          target_pred,
+                "is_dissent_mentor":    is_dissent_mentor,
             }
             if isinstance(self.model, TorchModel):
                 self.model.adjust_from_feedback(

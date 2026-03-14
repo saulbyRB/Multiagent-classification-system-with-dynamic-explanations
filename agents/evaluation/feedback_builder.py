@@ -162,7 +162,7 @@ class FeedbackBuilder:
                       f"(ningún candidato alineado con mayoría superó umbrales)")
 
         if not candidates:
-            return None, []
+            return None, [], False
 
         # ── Seleccionar el mejor o empatados ───────────────────────────────
         best_score    = max(c[2] for c in candidates)
@@ -213,11 +213,12 @@ class FeedbackBuilder:
               f"agreement_top5={[round(mentor_agreement[i],2) for i,_,_,_ in mentors]} | "
               f"top3={self._top3_indices(final_vec)}")
 
-        return final_vec, mentor_ids
+        return final_vec, mentor_ids, is_dissent_mentor
 
     def build_with_mentor(self, agent_id, decision, evaluation,
                           explanations=None, idx=0,
-                          mentor_vector=None, mentor_ids=None):
+                          mentor_vector=None, mentor_ids=None,
+                          is_dissent_mentor=False):
         feedback  = self.build(
             agent_id=agent_id,
             decision=decision,
@@ -228,12 +229,13 @@ class FeedbackBuilder:
         is_mentor = agent_id in (mentor_ids or [])
 
         feedback["peer_guidance"] = {
-            "has_mentor":    mentor_vector is not None and not is_mentor,
-            "is_mentor":     is_mentor,
-            "mentor_ids":    mentor_ids or [],
-            "mentor_vector": mentor_vector.tolist() if (
+            "has_mentor":         mentor_vector is not None and not is_mentor,
+            "is_mentor":          is_mentor,
+            "mentor_ids":         mentor_ids or [],
+            "mentor_vector":      mentor_vector.tolist() if (
                 mentor_vector is not None and not is_mentor
             ) else None,
+            "is_dissent_mentor":  is_dissent_mentor and not is_mentor,
         }
         return feedback
 

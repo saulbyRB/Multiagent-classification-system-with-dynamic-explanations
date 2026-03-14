@@ -347,10 +347,44 @@ class HybridEvaluator:
     # Feature std estimator
     # ======================================================
 
-    def _get_delta(self, feature_idx, n_features):
+    def _get_delta(self, feature_idx, n_features, instance=None, sign=None):
+        """
+        Delta adaptativo al contexto de la instancia.
+
+        Para features con std bajo (< 0.3), std*1.5 puede ser insuficiente
+        para cruzar umbrales de activación en redes neuronales. Se usa un
+        factor mínimo de 0.5 unidades absolutas.
+
+        Si la instancia está cerca del límite del rango en la dirección de
+        perturbación, se reduce el delta para no salir de la distribución real.
+        """
         if self._feature_std is not None and feature_idx < len(self._feature_std):
-            return float(self._feature_std[feature_idx] * 1.5)
-        return 0.5
+            base_delta = float(self._feature_std[feature_idx] * 2.0)   # factor 2x (antes 1.5x)
+            # mínimo absoluto para features con std bajo
+            base_delta = max(base_delta, 0.3)
+        else:
+            base_delta = 0.5
+
+        # Ajuste contextual: si la instancia está en el extremo del rango,
+        # limitar el delta en esa dirección para no salir de la distribución.
+        if (instance is not None
+                and sign is not None
+                and self._background is not None
+                and feature_idx < instance.shape[-1]):
+            feat_val = float(instance.flatten()[feature_idx])
+            feat_min = float(self._background[:, feature_idx].min())
+            feat_max = float(self._background[:, feature_idx].max())
+            feat_range = feat_max - feat_min + 1e-8
+            # Distancia al límite en la dirección de perturbación
+            if sign > 0:
+                margin = feat_max - feat_val
+            else:
+                margin = feat_val - feat_min
+            # Si el margen es menor que el delta, usar el margen (con 10% de tolerancia)
+            if margin < base_delta:
+                base_delta = max(margin * 0.9, feat_range * 0.05)
+
+        return float(base_delta)
 
     # ======================================================
     # Split por tipo de explainer
@@ -436,7 +470,7 @@ class HybridEvaluator:
                         stability.append(raw_stab)
 
             fidelity = [
-                self._compute_fidelity(v, inst, model, pred)
+                self._compute_fidelity(v, inst, model, pred, explainer_name=name)
                 for v, inst, model, pred in zip(vectors, instances, models, preds)
             ]
 
@@ -583,56 +617,178 @@ class HybridEvaluator:
     # Fidelity — perturbación escala-aware con background
     # ======================================================
 
-    def _compute_fidelity(self, expl_vector, instance, model, original_pred):
+    def _compute_fidelity(self, expl_vector, instance, model, original_pred,
+                          explainer_name=""):
+        """
+        Fidelity dual según tipo de explainer:
+
+        SHAP  → correlación de gradientes: mide si el vector SHAP predice
+                correctamente la dirección del cambio de probabilidad al
+                perturbar cada feature. No depende de cruzar la frontera
+                de decisión — mide alineación entre gradientes del explainer
+                y gradientes numéricos del modelo. Apropiado para zonas de
+                frontera donde cambiar la clase predicha requiere perturbaciones
+                grandes y los vecinos son de clases mezcladas.
+
+        LIME  → sensibilidad local con probe set de vecinos (método actual):
+                mide si las top-features de LIME realmente cambian la predicción.
+                Funciona bien para LIME porque éste ya está calibrado localmente.
+        """
         if expl_vector is None or instance is None or model is None:
             return 0.5
 
         try:
-            v          = np.asarray(expl_vector, dtype=float)
-            n_features = v.shape[0]
-
-            k     = max(1, int(0.3 * n_features))
-            top_k = set(np.argsort(np.abs(v))[::-1][:k].tolist())
-            rest  = [i for i in range(n_features) if i not in top_k]
-
-            if not rest:
-                return 0.5
-
-            if self._background is not None and len(self._background) >= 5:
-                idxs      = np.random.choice(len(self._background), size=20, replace=False)
-                probe_set = self._background[idxs]
+            if "shap" in explainer_name.lower():
+                return self._shap_fidelity_gradient(expl_vector, instance, model)
             else:
-                probe_set = np.asarray(instance, dtype=float).reshape(1, -1)
-
-            def mean_sensitivity(feature_indices):
-                effects = []
-                for x_probe in probe_set:
-                    x  = x_probe.reshape(1, -1)
-                    y0 = int(model.predict(x)[0])
-                    for fi in feature_indices:
-                        delta = self._get_delta(fi, n_features)
-                        for sign in (+1, -1):
-                            xi = x.copy()
-                            xi[0, fi] += sign * delta
-                            yi = int(model.predict(xi)[0])
-                            if yi != y0:
-                                effects.append(1.0)
-                                break
-                        else:
-                            effects.append(0.0)
-                return float(np.mean(effects)) if effects else 0.0
-
-            top_score  = mean_sensitivity(list(top_k))
-            base_idxs  = np.random.choice(rest, size=min(k, len(rest)), replace=False)
-            base_score = mean_sensitivity(base_idxs.tolist()) + 1e-6
-
-            ratio    = top_score / base_score
-            fidelity = ratio / (ratio + 1.0)
-
-            return float(np.clip(fidelity, 0.0, 1.0))
-
+                return self._lime_fidelity_perturbation(expl_vector, instance, model, original_pred)
         except Exception:
             return 0.5
+
+    def _shap_fidelity_gradient(self, shap_vector, instance, model):
+        """
+        Fidelity SHAP via correlación con gradientes numéricos.
+
+        Método:
+        1. Calcular gradiente numérico de P(clase_predicha) respecto a
+           cada feature, en la instancia concreta y en un subconjunto
+           del background cercano.
+        2. Medir correlación de Spearman entre |shap_vector| y |gradiente|.
+           Spearman captura coincidencia en el ranking de features sin
+           asumir linealidad.
+        3. Normalizar a [0, 1]: fidelity = (corr + 1) / 2.
+
+        Un SHAP de alta fidelidad predice el mismo ranking de features
+        que los gradientes numéricos reales del modelo.
+        """
+        from scipy.stats import spearmanr
+
+        v    = np.asarray(shap_vector, dtype=float)
+        inst = np.asarray(instance, dtype=float).reshape(1, -1)
+        n_feat = v.shape[0]
+
+        pred_class = int(model.predict(inst)[0])
+
+        # ── Puntos de evaluación: instancia + vecinos más próximos ───────────
+        if self._background is not None and len(self._background) >= 3:
+            std_all   = self._feature_std if self._feature_std is not None else np.ones(n_feat)
+            norm_bg   = (self._background - inst) / (std_all + 1e-8)
+            dists     = np.linalg.norm(norm_bg, axis=1)
+            # Solo usar vecinos de la misma clase predicha para evitar
+            # gradientes en dirección opuesta que confunden la correlación
+            same_class_mask = np.array([
+                int(model.predict(self._background[i:i+1])[0]) == pred_class
+                for i in range(len(self._background))
+            ])
+            if same_class_mask.sum() >= 3:
+                dists_filtered = np.where(same_class_mask, dists, np.inf)
+            else:
+                dists_filtered = dists  # fallback: todos
+            n_neighbors = min(5, int(same_class_mask.sum()))
+            neighbor_idxs = np.argsort(dists_filtered)[:n_neighbors]
+            probe_points = np.vstack([inst, self._background[neighbor_idxs]])
+        else:
+            probe_points = inst
+
+        # ── Gradiente numérico: ΔP(pred_class) / Δfeature_i ─────────────────
+        grad_sum = np.zeros(n_feat)
+        n_valid  = 0
+
+        for x_probe in probe_points:
+            x = x_probe.reshape(1, -1)
+            try:
+                p0 = model.predict_proba(x)[0][pred_class]
+            except Exception:
+                continue
+
+            grad_local = np.zeros(n_feat)
+            for fi in range(n_feat):
+                delta = self._get_delta(fi, n_feat, instance=x, sign=+1)
+                xi_p = x.copy(); xi_p[0, fi] += delta
+                xi_m = x.copy(); xi_m[0, fi] -= delta
+                try:
+                    pp = model.predict_proba(xi_p)[0][pred_class]
+                    pm = model.predict_proba(xi_m)[0][pred_class]
+                    grad_local[fi] = (pp - pm) / (2 * delta + 1e-12)
+                except Exception:
+                    grad_local[fi] = 0.0
+
+            grad_sum += np.abs(grad_local)
+            n_valid  += 1
+
+        if n_valid == 0:
+            return 0.5
+
+        grad_mean = grad_sum / n_valid
+
+        # ── Correlación de Spearman entre SHAP y gradiente (con signo) ───────
+        # Usar vectores con signo: SHAP correcto debe tener el mismo signo
+        # que el gradiente de P(clase_predicha) respecto a cada feature.
+        # spearmanr(shap, grad) ≈ 1.0 si coinciden en ranking Y dirección,
+        # ≈ 0.0 si son ortogonales, ≈ -1.0 si son opuestos.
+        if np.std(v) < 1e-8 or np.std(grad_mean) < 1e-8:
+            return 0.5   # vectores constantes — no hay ranking que comparar
+
+        corr, _ = spearmanr(v, grad_mean)
+        if np.isnan(corr):
+            return 0.5
+
+        # Normalizar [-1, 1] → [0, 1]
+        return float(np.clip((corr + 1.0) / 2.0, 0.0, 1.0))
+
+    def _lime_fidelity_perturbation(self, expl_vector, instance, model, original_pred):
+        """
+        Fidelity LIME: sensibilidad local con probe set de vecinos.
+        Versión actual — funciona bien para LIME porque éste ya está
+        calibrado en el vecindario local de la instancia.
+        """
+        v          = np.asarray(expl_vector, dtype=float)
+        n_features = v.shape[0]
+        inst       = np.asarray(instance, dtype=float).reshape(1, -1)
+
+        k     = max(1, int(0.3 * n_features))
+        top_k = list(np.argsort(np.abs(v))[::-1][:k].tolist())
+        rest  = [i for i in range(n_features) if i not in top_k]
+
+        if not rest:
+            return 0.5
+
+        if self._background is not None and len(self._background) >= 5:
+            norm_bg       = (self._background - inst) / (self._feature_std + 1e-8)
+            dists         = np.linalg.norm(norm_bg, axis=1)
+            neighbor_idxs = np.argsort(dists)[:9]
+            probe_set     = np.vstack([inst, self._background[neighbor_idxs]])
+        else:
+            probe_set = inst
+
+        def mean_sensitivity(feature_indices):
+            effects = []
+            for x_probe in probe_set:
+                x  = x_probe.reshape(1, -1)
+                y0 = int(model.predict(x)[0])
+                changed = False
+                for fi in feature_indices:
+                    grad_sign = np.sign(v[fi]) if abs(v[fi]) > 1e-8 else 0
+                    signs = ([-grad_sign, grad_sign] if grad_sign != 0 else [+1, -1])
+                    for sign in signs:
+                        delta = self._get_delta(fi, n_features, instance=x, sign=sign)
+                        xi = x.copy()
+                        xi[0, fi] += sign * delta
+                        if int(model.predict(xi)[0]) != y0:
+                            effects.append(1.0)
+                            changed = True
+                            break
+                    if changed:
+                        break
+                if not changed:
+                    effects.append(0.0)
+            return float(np.mean(effects)) if effects else 0.0
+
+        top_score  = mean_sensitivity(top_k)
+        base_idxs  = np.random.choice(rest, size=min(k, len(rest)), replace=False)
+        base_score = mean_sensitivity(base_idxs.tolist()) + 1e-6
+        ratio      = top_score / base_score
+        return float(np.clip(ratio / (ratio + 1.0), 0.0, 1.0))
 
     # ======================================================
     # Métricas clásicas
@@ -744,3 +900,6 @@ class HybridEvaluator:
     def _cosine(self, a, b, eps=1e-8):
         raw = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + eps))
         return max(0.0, raw)
+
+
+    

@@ -59,7 +59,12 @@ class TorchModel(BaseModel):
         else:
             dataset = TensorDataset(X_t, y_t)
 
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        # Generator fijo por iteración → shuffle reproducible entre tests
+        # con la misma semilla, distinto entre iteraciones (seed evoluciona).
+        g = torch.Generator()
+        g.manual_seed(42 + self.current_iteration)
+        loader = DataLoader(dataset, batch_size=self.batch_size,
+                            shuffle=True, generator=g)
         self.nn_model.train()
 
         for _ in range(epochs):
@@ -85,7 +90,8 @@ class TorchModel(BaseModel):
         strategy      = signals.get("strategy", "soft_adjust")
         reward        = signals.get("reward", None)
         trend         = signals.get("trend", 0.0)
-        mentor_vector = signals.get("mentor_vector", None)   # ← nuevo
+        mentor_vector = signals.get("mentor_vector", None)
+        is_dissent    = signals.get("is_dissent_mentor", False)
         instance      = signals.get("instance", None)        # ← nuevo
         target_pred   = signals.get("target_pred", None)     # ← nuevo
 
@@ -139,18 +145,27 @@ class TorchModel(BaseModel):
                   f"target={target_pred}")
 
             X_aug, y_aug, w_aug = self._build_mentor_batch(
-                X_train, y_train, instance, target_pred, mentor_vector
+                X_train, y_train, instance, target_pred, mentor_vector,
+                is_dissent=is_dissent
             )
 
             # Descongelar todas las capas para el fine-tune dirigido
             self._freeze_layers(1.0)
 
-            # Fine-tune con el batch aumentado (pocas épocas, lr reducido)
-            lr_mentor = self.lr * 0.5
+            # Mentor disidente: más épocas y lr completo para corrección efectiva.
+            # Mentor normal: lr reducido y pocas épocas (ajuste fino, no corrección).
+            if is_dissent:
+                lr_factor = 1.0
+                n_epochs  = 5
+            else:
+                lr_factor = 0.5
+                n_epochs  = 2
+
+            lr_mentor = self.lr * lr_factor
             for g in self.optimizer.param_groups:
                 g["lr"] = lr_mentor
 
-            self._train_loop(X_aug, y_aug, epochs=2, sample_weights=w_aug)
+            self._train_loop(X_aug, y_aug, epochs=n_epochs, sample_weights=w_aug)
 
             # Restaurar lr original
             for g in self.optimizer.param_groups:
@@ -166,19 +181,16 @@ class TorchModel(BaseModel):
         self.current_iteration += 1
 
     def _build_mentor_batch(self, X_train, y_train, instance,
-                             target_pred, mentor_vector, n_replicas=10):
+                             target_pred, mentor_vector,
+                             n_replicas=10, is_dissent=False):
         """
-        Construye un batch aumentado para el fine-tune guiado:
+        Construye un batch aumentado para el fine-tune guiado.
 
-        1. Toma el train set original.
-        2. Replica la instancia N veces con el target correcto,
-           con peso alto (proporcional a importancia de features del mentor).
-        3. Los ejemplos del train set tienen peso 1.0.
-        4. Las réplicas tienen peso = base_weight * feature_importance_factor.
-
-        El factor de importancia refuerza la señal en las features
-        que el mentor considera relevantes, añadiendo pequeñas perturbaciones
-        gaussianas para que el modelo no sobreajuste a un único punto.
+        is_dissent=True: el mentor contradice la mayoría — señal más fuerte.
+          - n_replicas: 25 (vs 10 normal)
+          - base_weight: 5.0 (vs ~1.2 normal)
+          Las réplicas representan ~15% del batch total (vs ~8% normal),
+          suficiente para corregir la predicción incorrecta en pocas iters.
         """
         x_inst = np.asarray(instance, dtype=float).reshape(1, -1)
         n_feat = x_inst.shape[1]
@@ -188,16 +200,25 @@ class TorchModel(BaseModel):
              else np.abs(mentor_vector)
         mv_norm = mv / (mv.max() + 1e-8)
 
+        # Parámetros según tipo de mentor
+        if is_dissent:
+            n_replicas  = 25     # más réplicas para señal más fuerte
+            base_weight = 5.0    # peso base alto — corrección agresiva
+        else:
+            base_weight = 1.0    # peso base normal
+
         # Generar réplicas con ruido gaussiano ponderado por importancia
-        noise_scale = 0.05  # pequeño para no alejarse del punto original
+        noise_scale = 0.05
         replicas_x = []
         replicas_w = []
 
+        # Ruido reproducible: semilla basada en iteración actual
+        rng = np.random.RandomState(42 + self.current_iteration)
+
         for _ in range(n_replicas):
-            noise = np.random.randn(n_feat) * noise_scale * mv_norm
+            noise = rng.randn(n_feat) * noise_scale * mv_norm
             x_rep = x_inst.flatten() + noise
-            # Peso de la réplica: más alto para features importantes
-            importance_factor = 1.0 + float(mv_norm.mean()) * 2.0
+            importance_factor = base_weight + float(mv_norm.mean()) * 2.0
             replicas_x.append(x_rep)
             replicas_w.append(importance_factor)
 
