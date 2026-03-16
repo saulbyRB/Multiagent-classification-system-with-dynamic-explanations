@@ -20,7 +20,7 @@ _COOLDOWN_THRESHOLD = {
     "TorchModel":            8,
     "GradientBoostingModel": 5,
     "RandomForest":          5,
-    "default":               3,
+    "default":               4,
 }
 
 _COOLDOWN_DECAY_EVERY = 10
@@ -121,7 +121,7 @@ class ClassifierAgent:
         self._iters_since_adjust += 1
 
         # ── Detección de colapso LIME: reinicializar si top-1 se repite ───
-        _LIME_COLLAPSE_THRESHOLD = 8  # iteraciones consecutivas con mismo top-1
+        _LIME_COLLAPSE_THRESHOLD = 6  # iteraciones consecutivas con mismo top-1
         if not hasattr(self, "_lime_top1_streak"):
             self._lime_top1_streak = {}  # explainer_name → (feature, count)
 

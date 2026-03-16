@@ -25,8 +25,8 @@ class HybridEvaluator:
     # ── Penalización drástica por exp_quality baja sostenida ────────────────────
     # Si un agente lleva N iters consecutivas con exp_quality < umbral,
     # su score se multiplica por un factor severo → force_adjust orgánico.
-    EXP_QUALITY_PENALTY_THRESHOLD = 0.55
-    EXP_QUALITY_PENALTY_WINDOW    = 5
+    EXP_QUALITY_PENALTY_THRESHOLD = 0.35
+    EXP_QUALITY_PENALTY_WINDOW    = 6
     EXP_QUALITY_PENALTY_FACTOR    = 0.45
 
     def __init__(

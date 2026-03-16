@@ -8,15 +8,15 @@ class ConflictResolver:
         self,
         low_q=0.25,
         high_q=0.75,
-        min_exp_quality=0.45,
+        min_exp_quality=0.35,
         min_stability=0.75,
         min_fidelity=0.0,
         min_agreement=0.5,
-        consensus_stop=0.65,
-        satisfaction_window=4,
-        min_accuracy_stop=0.85,
-        warmup_iterations=5,
-        max_disagreement_iters=6,   # iters consecutivas discrepando → force_adjust
+        consensus_stop=0.45,
+        satisfaction_window=3,
+        min_accuracy_stop=0.70,
+        warmup_iterations=3,
+        max_disagreement_iters=8,   # iters consecutivas discrepando → force_adjust
     ):
         self.low_q                  = low_q
         self.high_q                 = high_q

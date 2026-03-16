@@ -3,9 +3,9 @@ import numpy as np
 
 # ── Umbrales para ser mentor ───────────────────────────────────────────────────
 MENTOR_THRESHOLDS = {
-    "exp_quality": 0.75,   # recalibrado: rank-weighted agreement da valores menores
+    "exp_quality": 0.65,   # recalibrado: rank-weighted agreement da valores menores
     "agreement":   0.25,   # recalibrado: desacuerdo SHAP/LIME informado da ~0.27-0.35
-    "fidelity":    0.75,
+    "fidelity":    0.55,
     "confidence":  0.60,
 }
 
@@ -16,7 +16,7 @@ MENTOR_THRESHOLDS = {
 # features que explica, su predicción disidente merece consideración.
 MENTOR_DISSENT_THRESHOLDS = {
     "exp_quality": 0.72,   # ligeramente por debajo del umbral normal
-    "fidelity":    0.82,   # sigue siendo exigente — disenso bien fundado
+    "fidelity":    0.65,   # sigue siendo exigente — disenso bien fundado
     "confidence":  0.65,   # confianza mínima en la predicción disidente
 }
 
