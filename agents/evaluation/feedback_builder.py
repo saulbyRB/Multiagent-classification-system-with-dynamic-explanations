@@ -3,10 +3,10 @@ import numpy as np
 
 # ── Umbrales para ser mentor ───────────────────────────────────────────────────
 MENTOR_THRESHOLDS = {
-    "exp_quality": 0.65,   # recalibrado: rank-weighted agreement da valores menores
+    "exp_quality": 0.55,   # recalibrado: rank-weighted agreement da valores menores
     "agreement":   0.25,   # recalibrado: desacuerdo SHAP/LIME informado da ~0.27-0.35
     "fidelity":    0.55,
-    "confidence":  0.60,
+    "confidence":  0.50,
 }
 
 # ── Umbrales para mentor disidente (contradice la mayoría) ───────────────────

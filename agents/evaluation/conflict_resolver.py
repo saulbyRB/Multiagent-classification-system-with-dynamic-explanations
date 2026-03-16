@@ -9,7 +9,7 @@ class ConflictResolver:
         low_q=0.25,
         high_q=0.75,
         min_exp_quality=0.35,
-        min_stability=0.75,
+        min_stability=0.60,
         min_fidelity=0.0,
         min_agreement=0.5,
         consensus_stop=0.45,

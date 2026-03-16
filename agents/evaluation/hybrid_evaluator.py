@@ -465,7 +465,7 @@ class HybridEvaluator:
                 else:
                     raw_stab = self._cosine(v, np.mean(hist, axis=0))
                     if iters_since_adjust[i] <= 2:
-                        stability.append(max(raw_stab, 0.75))
+                        stability.append(max(raw_stab, 0.60))
                     else:
                         stability.append(raw_stab)
 
